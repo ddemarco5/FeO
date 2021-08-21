@@ -57,7 +57,7 @@ async fn main() {
     let run_token = tokio::spawn(async move {
         debug!("Started the bot loop");
         loop {
-            // Wait 5 mins (300 seconds)
+            // Check every 30 seconds
             sleep(Duration::from_secs(30)).await;
             match reddit.update().await {
                 Ok(message_opt) => {
