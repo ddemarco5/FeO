@@ -32,7 +32,7 @@ async fn main() {
         .path("./sniffer_log.txt")
         .size(500)
         .roll_count(10)
-        .level("debug")
+        .level("info")
         .output_file()
         .output_console()
         .build();
@@ -55,7 +55,7 @@ async fn main() {
 
     // Run in a loop to wait for the sniffer to strike again
     let run_token = tokio::spawn(async move {
-        debug!("Started the bot loop");
+        info!("Starting scraper thread");
         loop {
             // Check every 30 seconds
             sleep(Duration::from_secs(30)).await;
@@ -84,10 +84,10 @@ async fn main() {
     let future_wait = tokio::spawn(async move {
         select! {
             _ = wait_token(run_token) => {
-                debug!("Our loop finished first")
+                info!("Bot thread stopped")
             }
             _ = wait_sigint() => {
-                debug!("Our control-c came first")
+                info!("Got SIGINT")
             }
         };
     });

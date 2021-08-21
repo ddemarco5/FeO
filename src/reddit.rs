@@ -57,7 +57,7 @@ impl RedditScraper {
     
     pub async fn update(&mut self) -> Result<Option<Vec<SnifferPost>>, RouxError> {
 
-        info!("Updating reddit posts");
+        debug!("Updating reddit posts");
 
         // Get from reddit api
         let reddit_posts = self.the_sniffer.submitted().await;
