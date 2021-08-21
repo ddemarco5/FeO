@@ -1,0 +1,32 @@
+[package]
+name = "sniffer"
+version = "0.6.9"
+authors = ["Dominic DeMarco <awesome3165@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+roux = { git = "https://github.com/halcyonnouveau/roux.git" }
+#roux = "*"
+tokio = { version = "*", features = ["full"] }
+tokio-util = "*"
+log = "*"
+simple-log = "*"
+serde = { version = "*", features = ["derive"] }
+serde_yaml = "*"
+
+[dependencies.serenity]
+default-features = false
+features = [
+    "builder",
+    "client",
+    #"framework",
+    "gateway",
+    "http",
+    "model",
+    #"standard_framework",
+    "utils",
+    "native_tls_backend",
+]
+version = "*"
