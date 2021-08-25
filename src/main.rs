@@ -52,7 +52,6 @@ async fn main() {
     // Create our api interfaces
     let mut reddit = reddit::RedditScraper::new(secrets.sniffer.clone());
     let discord_bot = Arc::new(RwLock::new(
-        //discord::DiscordBot::new(secrets.bot_token, secrets.main_channel, secrets.archive_channel, secrets.test_channel).await
         discord::DiscordBot::new(secrets).await
     ));
 
@@ -74,7 +73,7 @@ async fn main() {
         warn!("Starting scraper thread");
         loop {
             // Check every X seconds
-            sleep(Duration::from_secs(60)).await;
+            sleep(Duration::from_secs(45)).await;
             match reddit.update().await {
                 Ok(message_opt) => {
                     match message_opt {
@@ -87,7 +86,7 @@ async fn main() {
                             }    
                         },
                         None => {
-                            warn!("No sniffer message");
+                            warn!("No new sniffer message");
                         },
                     }
                 }
@@ -105,11 +104,14 @@ async fn main() {
             }
             _ = wait_sigint() => {
                 warn!("Got SIGINT");
-                // Kill our sharts
+                // Kill our shards
                 discord_bot_clone.write().await.stop_shards().await;
             }
         };
     });
+
+
+    discord_bot.clone().read().await.print_shard_info().await;
 
     println!("Ctrl-C to exit...");
     

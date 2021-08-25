@@ -5,16 +5,16 @@ use crate::Secrets;
 //use std::sync::{Arc,RwLock};
 use std::sync::Arc;
 use tokio::select;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
 use tokio_util::sync::CancellationToken;
 
 // For Discord
 use serenity::{
     model::{id::ChannelId},
-    client::Client,
+    client::{Client, bridge::gateway::ShardManager},
     async_trait,
     prelude::*,
-    model::{event::ResumedEvent, gateway::Ready}
+    model::{event::ResumedEvent, gateway::{Ready, Activity}}
 };
 
 
@@ -24,6 +24,7 @@ pub struct DiscordBot {
     bot_http: Arc<serenity::http::client::Http>,
     shard_handle: Option<tokio::task::JoinHandle<()>>,
     shard_cancel_token: CancellationToken,
+    shard_manager: Arc<Mutex<ShardManager>>,
     chat_channel: ChannelId,
     test_channel: ChannelId,
     archive_channel: ChannelId,
@@ -36,6 +37,7 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         warn!("Connected as {}, setting bot to online", ready.user.name);
         ctx.reset_presence().await;
+        ctx.set_activity(Activity::watching("the sniffer")).await;
     }
 
     async fn resume(&self, ctx: Context, _: ResumedEvent) {
@@ -57,27 +59,21 @@ impl DiscordBot {
         let serenity_bot = Client::builder(&token)
             .event_handler(Handler)
             .await
-            .expect("Err creating client");
+            .expect("Error creating client");
         // Get a shared ref of our http cache so we can use it to send messages in an async fashion
         let http = serenity_bot.cache_and_http.http.clone();
+        // And for shard manager too
+        let manager_clone = serenity_bot.shard_manager.clone();
         let bot = DiscordBot {
                 serenity_bot: Arc::new(RwLock::new(serenity_bot)),
                 bot_http: http,
                 shard_handle: None,
                 shard_cancel_token: CancellationToken::new(),
+                shard_manager: manager_clone,
                 chat_channel: ChannelId(secrets.main_channel), // main channel
                 test_channel: ChannelId(secrets.test_channel),
                 archive_channel: ChannelId(secrets.archive_channel), // the archive channel
             };
-        // bot.serenity_bot.start().await.expect("Failed to start shard")
-        // Grab the discord object
-        /*
-        let discord_bot = bot.serenity_bot.clone();
-        tokio::spawn(async move{
-            //bot.serenity_bot.start_shard(0, 1).await.expect("Failed to start shard 0 of 1 ");
-            discord_bot.read().unwrap().start_shard(0, 1).await.expect("Failed to start shard 0 of 1 ");
-        });
-        */
 
         return bot;
     }
@@ -89,17 +85,29 @@ impl DiscordBot {
             tokio::spawn(async move {
                 let mut lock = bot.write().await;
                 select! {
-                    //_ = lock.start_shards(num_shards).await.expect("Unable to start shards") => {
-                    _ = lock.start_shards(num_shards) => {
-                        warn!("Shart threads stopped")
+                    //_ = lock.start_shards(num_shards) => {
+                    _ = lock.start_shards(num_shards) => {  
+                        warn!("Shard threads stopped")
                     }
                     _ = cloned_token.cancelled() => {
-                        warn!{"Cancelled our sharts"}
+                        warn!{"Cancelled our shards"}
                     }
                 }
             })
         );
-        warn!("Started sharts");
+        warn!("Started shards");
+        
+    }
+
+    pub async fn print_shard_info(&self) {
+        let lock = self.shard_manager.lock().await;
+        let shard_runners = lock.runners.lock().await;
+        for (id, runner) in shard_runners.iter() {
+            warn!(
+                "Shard ID {} is {} with a latency of {:?}",
+                id, runner.stage, runner.latency,
+            );
+        }
     }
 
     pub async fn stop_shards(&mut self) {
@@ -115,9 +123,6 @@ impl DiscordBot {
     }
 
     pub async fn post_message(&self, message: SnifferPost) {
-        //let http_lock = self.serenity_bot.read().await;
-        //let http = &self.serenity_bot.cache_and_http.http;
-        //let http = &http_lock.cache_and_http.http;
         let http = &self.bot_http;
         info!("Trying to send message: {}", message);
         let mut message_text = format!("{}\n{}\n> /r/{}", message.title, message.body, message.subreddit);
