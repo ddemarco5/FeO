@@ -36,14 +36,19 @@ struct Handler;
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         warn!("Connected as {}, setting bot to online", ready.user.name);
-        ctx.reset_presence().await;
-        ctx.set_activity(Activity::watching("the sniffer")).await;
+        set_status(&ctx).await;
     }
 
     async fn resume(&self, ctx: Context, _: ResumedEvent) {
         warn!("Resumed (reconnected)");
-        ctx.reset_presence().await;
+        set_status(&ctx).await;
     }
+}
+
+// The reset presence and activity action for both ready and result
+async fn set_status(ctx: &Context) {
+    ctx.reset_presence().await;
+    ctx.set_activity(Activity::watching("the sniffer")).await;
 }
 
 impl DiscordBot {
