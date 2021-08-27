@@ -138,6 +138,9 @@ impl RedditScraper {
                     Some(x) => error!("Reddit gave us an incorrectly modified timestamp on existing post {}", x.id),
                     None => {
                         warn!("New sniffer post {}", p);
+                        // record our new posts in the cache
+                        self.post_cache.push(p.clone());
+                        warn!("Cached the new post");
                         new_posts.push(p);
                     },
                 }    
@@ -145,6 +148,7 @@ impl RedditScraper {
         }
 
         if !new_posts.is_empty() {
+            // record our new posts in the cache
             return Ok(Some(new_posts));
         }
         return Ok(None);
