@@ -4,12 +4,15 @@ use std::fmt;
 use roux::User;
 use roux::util::RouxError;
 
+
 #[derive(Debug, Clone)]
 pub struct SnifferPost {
     pub title: String,
     pub body: String,
     pub subreddit: String,
-    pub url: Option<String>
+    pub url: Option<String>,
+    pub id: String,
+    pub timestamp: u64,
 }
 
 
@@ -20,7 +23,9 @@ impl SnifferPost {
             title: roux.title,
             body: roux.selftext,
             subreddit: roux.subreddit,
-            url: roux.url
+            url: roux.url,
+            id: roux.id,
+            timestamp: roux.created as u64,
         }
     }
 }
@@ -28,8 +33,14 @@ impl SnifferPost {
 
 pub struct RedditScraper {
     the_sniffer: roux::User,
-    last_post_timestamp: f64,
-    post_ids: Vec<String>,
+    last_post_timestamp: u64,
+    post_cache: Vec<SnifferPost>,
+}
+
+impl PartialEq for SnifferPost {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
 }
 
 impl fmt::Display for SnifferPost {
@@ -50,71 +61,93 @@ impl RedditScraper {
 
     pub fn new(sniffer: String) -> RedditScraper {
         debug!("Created the reddit scraper");
-        RedditScraper {
+        let scraper = RedditScraper {
             the_sniffer: User::new(sniffer.as_str()),
-            last_post_timestamp: 0.0,
-            post_ids: Vec::new()
-        }
+            last_post_timestamp: 0,
+            post_cache: Vec::new()
+        };
+
+        scraper.init()
     }
-    
-    pub async fn update(&mut self) -> Result<Option<Vec<SnifferPost>>, RouxError> {
 
-        debug!("Updating reddit posts");
-
+    fn init(mut self) -> RedditScraper {
         // Get from reddit api
-        let reddit_posts = self.the_sniffer.submitted().await;
-        let reddit_posts = match reddit_posts {
-            Ok(submissions_data) => submissions_data,
+        let mut reddit_posts = self.pull_posts().expect("Error getting initial posts");
+
+        // Add our pulled posts to our cache
+        self.post_cache.append(&mut reddit_posts);
+
+        // update our most recent timestamp
+        self.last_post_timestamp = self.post_cache.last().unwrap().timestamp;
+
+        warn!("Pulled {} intial posts", self.post_cache.len());
+
+        return self;
+    }
+
+    fn pull_posts(&self) -> Result<Vec<SnifferPost>, RouxError> {
+        // Get from reddit api
+
+        // dumb shit to run async in a sync function
+        let reddit_posts = tokio::task::block_in_place(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+                self.the_sniffer.submitted().await
+            })
+        });
+        match reddit_posts {
+            Ok(submissions_data) => {
+                let mut new_posts = Vec::<SnifferPost>::new();
+                for p in submissions_data.data.children {
+                    new_posts.push(SnifferPost::from_roux(p.data));
+                }
+                // Always sort our posts oldest->newest bc reddit just gives them in random order
+                new_posts.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                return Ok(new_posts);
+            }
             Err(error) => {
                     error!("Encountered an error grabbing reddit posts\n{}", error);
                     return Err(error)
                 },
         };
+    }
+    
+    pub fn update(&mut self) -> Result<Option<Vec<SnifferPost>>, RouxError> {
 
-        let old_timestamp = self.last_post_timestamp;
-        debug!("timestamp to check against: {}", old_timestamp);
+        debug!("Updating reddit posts");
 
-        let mut posts = reddit_posts.data.children;
+        // Strip the async requirement out of this function
+        //let posts_result = tokio::task::block_in_place(move || {
 
-        // Add all our post ids to a vector so we can check if reddit is fucking up
-        for p in posts.iter_mut() {
-            // If we don't already have the post ID, add it to our running list
-            if !self.post_ids.contains(&p.data.id) {
-                debug!("added post id of {} to vec", p.data.id.clone());
-                self.post_ids.push(p.data.id.clone());
-            }
+        let posts_result = self.pull_posts();
+
+        //let fresh_posts = match self.pull_posts().await {
+        let fresh_posts = match posts_result {
+            Ok(d) => d,
+            Err(e) => return Err(e),
+        };
+
+        // Our vec of potential new posts
+        let mut new_posts = Vec::<SnifferPost>::new();
+
+        // Check our new posts with our cache to see if any exist
+        for p in fresh_posts {
+            // we only need to check the new post timestamps against the last recorded one
+            if p.timestamp > self.last_post_timestamp {
+                // Double-check to make sure that reddit didn't decide to "update" the timestamp on an older post
+                match self.post_cache.iter().find(|&x| x.id == p.id) {
+                    Some(x) => error!("Reddit gave us an incorrectly modified timestamp on existing post {}", x.id),
+                    None => {
+                        warn!("New sniffer post {}", p);
+                        new_posts.push(p);
+                    },
+                }    
+            } // If there's no new post detected, we don't put any in our vec
         }
 
-        // Sort oldest to newest
-        posts.sort_by(|a, b| a.data.created.partial_cmp(&b.data.created).unwrap());
-
-        // New vec
-        let mut new_posts: Vec<SnifferPost> = Vec::new();
-
-        // Add the sniffer's posts if they are newer than what we have
-        for post in posts {
-            let post_data = post.data;
-            // Check to make sure even if this timestamp check passes, the post ID doesn't exist in our records
-            if post_data.created > old_timestamp {
-                // Don't throw this error if the timestamp is 0, aka, first run
-                //if self.post_ids.contains(&post_data.id) && old_timestamp != 0.0 { 
-                //    error!("Reddit API is sucking a dick, they changed the post timestamp under us for {}", post_data.id)
-                //}
-                //else {
-                    // We've got a new one! update our latest timestamp
-                    debug!("added a sniffer post with timestamp {}", post_data.created);
-                    self.last_post_timestamp = post_data.created;
-                    let sniffer_post = SnifferPost::from_roux(post_data);
-                    debug!("post text is {}:", sniffer_post.clone());
-                    new_posts.push(sniffer_post);
-                //}  
-            }
+        if !new_posts.is_empty() {
+            return Ok(Some(new_posts));
         }
-        // We've got nothing
-        if new_posts.is_empty() {
-            return Ok(None);  
-        }
-        return Ok(Some(new_posts));
+        return Ok(None);
     }
 
 }

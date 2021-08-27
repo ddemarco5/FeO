@@ -51,6 +51,9 @@ async fn main() {
 
     // Create our api interfaces
     let mut reddit = reddit::RedditScraper::new(secrets.sniffer.clone());
+
+    //TODO: clean up how we create this object and share it with the tokio threads.
+    // might have to refactor the object a bit
     let discord_bot = Arc::new(RwLock::new(
         discord::DiscordBot::new(secrets).await
     ));
@@ -64,8 +67,7 @@ async fn main() {
 
 
     // Update the reddit posts so we know when a new one kicks in
-    reddit.update().await.expect("Error doing the initial reddit update");
-    warn!("Pulled intial posts");
+    reddit.update().expect("Error doing the initial reddit update");
 
     let discord_bot_clone = discord_bot.clone();
     // Run in a loop to wait for the sniffer to strike again
@@ -74,7 +76,7 @@ async fn main() {
         loop {
             // Check every X seconds
             sleep(Duration::from_secs(45)).await;
-            match reddit.update().await {
+            match reddit.update() {
                 Ok(message_opt) => {
                     match message_opt {
                         Some(messages) => {
