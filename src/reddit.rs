@@ -97,17 +97,17 @@ impl RedditScraper {
             // Check to make sure even if this timestamp check passes, the post ID doesn't exist in our records
             if post_data.created > old_timestamp {
                 // Don't throw this error if the timestamp is 0, aka, first run
-                if self.post_ids.contains(&post_data.id) && old_timestamp != 0.0 { 
-                    error!("Reddit API is sucking a dick, they changed the post timestamp under us for {}", post_data.id)
-                }
-                else {
+                //if self.post_ids.contains(&post_data.id) && old_timestamp != 0.0 { 
+                //    error!("Reddit API is sucking a dick, they changed the post timestamp under us for {}", post_data.id)
+                //}
+                //else {
                     // We've got a new one! update our latest timestamp
                     debug!("added a sniffer post with timestamp {}", post_data.created);
                     self.last_post_timestamp = post_data.created;
                     let sniffer_post = SnifferPost::from_roux(post_data);
                     debug!("post text is {}:", sniffer_post.clone());
                     new_posts.push(sniffer_post);
-                }  
+                //}  
             }
         }
         // We've got nothing
