@@ -89,10 +89,6 @@ impl RedditScraper {
 
         warn!("Pulled {} intial posts", self.post_cache.len());
 
-        for p in self.post_cache.clone() {
-            println!("{}",p.discord_string());
-        }
-
         return self;
     }
 
