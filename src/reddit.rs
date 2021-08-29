@@ -8,25 +8,40 @@ use roux::util::RouxError;
 #[derive(Debug, Clone)]
 pub struct SnifferPost {
     pub title: String,
-    pub body: String,
+    pub body: Option<String>,
     pub subreddit: String,
     pub url: Option<String>,
     pub id: String,
     pub timestamp: u64,
 }
 
-
+// TODO: Make sense of the timestamps, so that if the post is deleted we can post how long it took for luls
 impl SnifferPost {
     pub fn from_roux(roux: roux::subreddit::responses::SubmissionsData) -> SnifferPost {
         debug!("creating a new sniffer post object");
         SnifferPost {
             title: roux.title,
-            body: roux.selftext,
+            body: {
+                if roux.selftext.is_empty() {
+                    None
+                }
+                else {
+                    Some(roux.selftext)
+                }
+            },
             subreddit: roux.subreddit,
             url: roux.url,
             id: roux.id,
             timestamp: roux.created as u64,
         }
+    }
+    pub fn discord_string(&self) -> String {
+        // If we have body text, use it
+        match &self.body {
+            Some(b) => format!("{}\n```\n{}\n```\n> /r/{}", self.title, b, self.subreddit),
+            None => format!("{}\n> /r/{}", self.title, self.subreddit)
+        }
+
     }
 }
 
@@ -45,15 +60,7 @@ impl PartialEq for SnifferPost {
 
 impl fmt::Display for SnifferPost {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.url {
-            Some(m) => {
-                write!(f, "{}, {}, {}, {}", self.title, self.body, self.subreddit, m)
-            }
-            None => {
-                write!(f, "{}, {}, {}, No url", self.title, self.body, self.subreddit)
-            }
-        }
-        
+        write!(f, "{}, {:?}, {}, {:?}", self.title, self.body, self.subreddit, self.url)    
     }
 }
 
@@ -81,6 +88,10 @@ impl RedditScraper {
         self.last_post_timestamp = self.post_cache.last().unwrap().timestamp;
 
         warn!("Pulled {} intial posts", self.post_cache.len());
+
+        for p in self.post_cache.clone() {
+            println!("{}",p.discord_string());
+        }
 
         return self;
     }

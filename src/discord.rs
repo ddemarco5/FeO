@@ -130,8 +130,12 @@ impl DiscordBot {
     pub async fn post_message(&self, message: SnifferPost) {
         let http = &self.bot_http;
         info!("Trying to send message: {}", message);
-        let mut message_text = format!("{}\n{}\n> /r/{}", message.title, message.body, message.subreddit);
+        let mut message_text = message.discord_string();
+
+        // Send message to our primary channel
         self.chat_channel.say(&http, message_text.clone()).await.expect("Error sending message to main channel");
+
+        // Send message to our archive channel with url attached
         // Append the post url to this one if we have it
         match message.url { 
             Some(m) => {
@@ -139,7 +143,6 @@ impl DiscordBot {
             }
             None => {}
         }
-        
         self.archive_channel.say(&http, message_text).await.expect("Error sending message to archive");
     }
 

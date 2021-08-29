@@ -88,7 +88,7 @@ async fn main() {
                             }    
                         },
                         None => {
-                            warn!("No new sniffer message");
+                            debug!("No new sniffer message");
                         },
                     }
                 }
