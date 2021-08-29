@@ -134,8 +134,13 @@ impl RedditScraper {
             // we only need to check the new post timestamps against the last recorded one
             if p.timestamp > self.last_post_timestamp {
                 // Double-check to make sure that reddit didn't decide to "update" the timestamp on an older post
-                match self.post_cache.iter().find(|&x| x.id == p.id) {
-                    Some(x) => error!("Reddit gave us an incorrectly modified timestamp on existing post {}", x.id),
+                match self.post_cache.iter_mut().find(|x| x.id == p.id) {
+                    Some(x) => { 
+                        error!("Reddit gave us an incorrectly modified timestamp on existing post {}", x.id);
+                        // update the post with the new timestamp, thanks reddit
+                        error!("Updating {} timestamp to {} from {}", x.id, x.timestamp, p.timestamp);
+                        x.timestamp = p.timestamp;
+                    }
                     None => {
                         warn!("New sniffer post {}", p);
                         // record our new posts in the cache
