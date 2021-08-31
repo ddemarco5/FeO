@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate lazy_static;
+
 use tokio::{
     signal,
     time::sleep,
@@ -64,10 +67,6 @@ async fn main() {
         lock.start_shards(1).await;
     }
     
-
-
-    // Update the reddit posts so we know when a new one kicks in
-    reddit.update().expect("Error doing the initial reddit update");
 
     let discord_bot_clone = discord_bot.clone();
     // Run in a loop to wait for the sniffer to strike again

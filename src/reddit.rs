@@ -4,6 +4,9 @@ use std::fmt;
 use roux::User;
 use roux::util::RouxError;
 
+// For our url regex matching
+use regex::Regex;
+
 
 #[derive(Debug, Clone)]
 pub struct SnifferPost {
@@ -19,7 +22,7 @@ pub struct SnifferPost {
 impl SnifferPost {
     pub fn from_roux(roux: roux::subreddit::responses::SubmissionsData) -> SnifferPost {
         debug!("creating a new sniffer post object");
-        SnifferPost {
+        let mut snifferpost = SnifferPost {
             title: roux.title,
             body: {
                 if roux.selftext.is_empty() {
@@ -33,15 +36,61 @@ impl SnifferPost {
             url: roux.url,
             id: roux.id,
             timestamp: roux.created as u64,
-        }
+        };
+        // Parse/convert our body for html url strings
+        snifferpost.url_convert();
+        return snifferpost;
     }
     pub fn discord_string(&self) -> String {
         // If we have body text, use it
         match &self.body {
-            Some(b) => format!("{}\n```\n{}\n```> /r/{}", self.title, b, self.subreddit),
+            Some(b) => format!(
+                "{}\n\
+                \n\
+                {}\n\
+                > /r/{}", self.title, b, self.subreddit),
             None => format!("{}\n> /r/{}", self.title, self.subreddit)
         }
+    }
 
+    fn url_convert(&mut self) {
+        // This is to ensure that this regex is only compiled once, so we aren't dropping
+        // it from scope and compiling it in a loop when this function runs over iterated objects
+        // this regex is compiled at runtime
+        lazy_static! {
+            // Returns the whole string to replace in the first capture, contents of [] in 2nd and () in 3rd
+            static ref RE: Regex = Regex::new(r"\[(.*)\]\((.*)\)").unwrap();
+        }
+
+        match self.body.as_ref() {
+            Some(body) => {
+                match RE.captures(body.as_str()) {
+                    Some(m) => {
+                        // We got a match
+                        let string_to_match = &m[0];
+                        let first_url = &m[1];
+                        let second_url = &m[1];
+                        //println!("{}\n{}\n{}", string_to_match, first_url, second_url);
+        
+                        // Just make extra sure, make sure the contents of the html formatting string are equal
+                        if first_url == second_url {
+                            // Replace our html url with a discord friendly one wrapped in <> tags
+                            let replace_string = format!("<{}>", first_url);
+                            self.body = Some(body.replace(string_to_match, replace_string.as_str()));
+                            warn!("Parsed url in post {}", self.id);
+
+                            //println!("{}", self.discord_string());
+                            std::fs::write("test_string.txt", self.discord_string()).expect("Unable to write file");
+                        }
+                        else {
+                            error!("Our two urls didn't match in the regex, something must be off");
+                        }
+                    }
+                    None => () // do nothing
+                }
+            }
+            None => return      
+        }
     }
 }
 
