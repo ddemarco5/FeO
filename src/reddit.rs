@@ -22,7 +22,7 @@ pub struct SnifferPost {
 impl SnifferPost {
     pub fn from_roux(roux: roux::subreddit::responses::SubmissionsData) -> SnifferPost {
         debug!("creating a new sniffer post object");
-        let mut snifferpost = SnifferPost {
+        SnifferPost {
             title: roux.title,
             body: {
                 if roux.selftext.is_empty() {
@@ -36,10 +36,7 @@ impl SnifferPost {
             url: roux.url,
             id: roux.id,
             timestamp: roux.created as u64,
-        };
-        // Parse/convert our body for html url strings
-        snifferpost.url_convert();
-        return snifferpost;
+        }
     }
     pub fn discord_string(&self) -> String {
         // If we have body text, use it
@@ -53,7 +50,8 @@ impl SnifferPost {
         }
     }
 
-    fn url_convert(&mut self) {
+    pub fn format_urls(&mut self) {
+    //pub fn url_convert(mut self) -> SnifferPost {
         // This is to ensure that this regex is only compiled once, so we aren't dropping
         // it from scope and compiling it in a loop when this function runs over iterated objects
         // this regex is compiled at runtime
@@ -78,9 +76,6 @@ impl SnifferPost {
                             let replace_string = format!("<{}>", first_url);
                             self.body = Some(body.replace(string_to_match, replace_string.as_str()));
                             warn!("Parsed url in post {}", self.id);
-
-                            //println!("{}", self.discord_string());
-                            std::fs::write("test_string.txt", self.discord_string()).expect("Unable to write file");
                         }
                         else {
                             error!("Our two urls didn't match in the regex, something must be off");
@@ -89,8 +84,9 @@ impl SnifferPost {
                     None => () // do nothing
                 }
             }
-            None => return      
+            None => ()     
         }
+        //return self; // Give ourselves back whether we made changes or not
     }
 }
 
@@ -129,6 +125,11 @@ impl RedditScraper {
     fn init(mut self) -> RedditScraper {
         // Get from reddit api
         let mut reddit_posts = self.pull_posts().expect("Error getting initial posts");
+
+        // Format the hyperlink text of all our pulled posts for consistency
+        for post in reddit_posts.iter_mut() {
+            post.format_urls();
+        }
 
         // Add our pulled posts to our cache
         self.post_cache.append(&mut reddit_posts);
@@ -177,7 +178,7 @@ impl RedditScraper {
         let posts_result = self.pull_posts();
 
         //let fresh_posts = match self.pull_posts().await {
-        let fresh_posts = match posts_result {
+        let mut fresh_posts = match posts_result {
             Ok(d) => d,
             Err(e) => return Err(e),
         };
@@ -186,7 +187,7 @@ impl RedditScraper {
         let mut new_posts = Vec::<SnifferPost>::new();
 
         // Check our new posts with our cache to see if any exist
-        for p in fresh_posts {
+        for p in fresh_posts.iter_mut() {
             // we only need to check the new post timestamps against the last recorded one
             if p.timestamp > self.last_post_timestamp {
                 // Double-check to make sure that reddit didn't decide to "update" the timestamp on an older post
@@ -201,11 +202,13 @@ impl RedditScraper {
                     }
                     None => {
                         warn!("New sniffer post {}", p);
+                        // Fix and urls in the post's body
+                        p.format_urls();
                         // record our new posts in the cache
                         self.post_cache.push(p.clone());
                         warn!("Cached the new post");
                         // Add our new posts
-                        new_posts.push(p);
+                        new_posts.push(p.clone());
                         // Update the most recent timestamp 
                         self.last_post_timestamp = new_posts.last().unwrap().timestamp;
                     },

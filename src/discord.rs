@@ -90,7 +90,6 @@ impl DiscordBot {
             tokio::spawn(async move {
                 let mut lock = bot.write().await;
                 select! {
-                    //_ = lock.start_shards(num_shards) => {
                     _ = lock.start_shards(num_shards) => {  
                         warn!("Shard threads stopped")
                     }
