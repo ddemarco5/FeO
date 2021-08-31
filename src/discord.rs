@@ -2,7 +2,6 @@
 use crate::reddit::SnifferPost;
 use crate::Secrets;
 
-//use std::sync::{Arc,RwLock};
 use std::sync::Arc;
 use tokio::select;
 use tokio::sync::{RwLock, Mutex};
@@ -18,11 +17,10 @@ use serenity::{
 };
 
 
-
 pub struct DiscordBot {
     serenity_bot: Arc<RwLock<Client>>,
     bot_http: Arc<serenity::http::client::Http>,
-    shard_handle: Option<tokio::task::JoinHandle<()>>,
+    shard_handle: Option<futures_locks::Mutex<tokio::task::JoinHandle<()>>>,
     shard_cancel_token: CancellationToken,
     shard_manager: Arc<Mutex<ShardManager>>,
     chat_channel: ChannelId,
@@ -86,7 +84,7 @@ impl DiscordBot {
     pub async fn start_shards(&mut self, num_shards: u64) {
         let bot = self.serenity_bot.clone();
         let cloned_token = self.shard_cancel_token.clone();
-        self.shard_handle = Some(
+        self.shard_handle = Some(futures_locks::Mutex::new(
             tokio::spawn(async move {
                 let mut lock = bot.write().await;
                 select! {
@@ -98,7 +96,7 @@ impl DiscordBot {
                     }
                 }
             })
-        );
+        ));
         warn!("Started shards");
         
     }
@@ -115,10 +113,16 @@ impl DiscordBot {
     }
 
     pub async fn stop_shards(&mut self) {
+        // Start the cancel
         self.shard_cancel_token.cancel();
-        match self.shard_handle.as_mut() {
+        // Wait on our handle
+        match &self.shard_handle{
             Some(x) => {
-                x.await.expect("failed waiting for the sharts to end");
+                let handle_lock = x.lock();
+                handle_lock.await;
+                warn!("Successfully waited on future");
+                //handle_box.await.expect("failed waiting for the sharts to end");
+                //*handle_lock.await;
             }
             None => {
                 error!("We don't have a shard handle")
@@ -153,3 +157,24 @@ impl DiscordBot {
     }
 
 }
+
+impl Clone for DiscordBot {
+    fn clone(&self) -> Self {
+        DiscordBot {
+            serenity_bot: self.serenity_bot.clone(),
+            bot_http: self.bot_http.clone(),
+            shard_handle: {
+                match &self.shard_handle {
+                    Some(h) => Some(h.clone()),
+                    None => None,
+                }
+            },
+            shard_cancel_token: self.shard_cancel_token.clone(),
+            shard_manager: self.shard_manager.clone(),
+            chat_channel: self.chat_channel.clone(),
+            test_channel: self.test_channel.clone(),
+            archive_channel: self.archive_channel.clone(),
+        }
+    }
+}
+

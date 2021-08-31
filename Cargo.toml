@@ -17,6 +17,7 @@ serde = { version = "*", features = ["derive"] }
 serde_yaml = "*"
 regex = "*"
 lazy_static = "*"
+futures-locks = "*"
 
 [dependencies.serenity]
 default-features = false

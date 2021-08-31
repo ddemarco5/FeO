@@ -15,9 +15,6 @@ use simple_log::LogConfigBuilder;
 use serde::Deserialize;
 use std::fs::OpenOptions;
 
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
 mod reddit;
 mod discord;
 
@@ -55,19 +52,12 @@ async fn main() {
     // Create our api interfaces
     let mut reddit = reddit::RedditScraper::new(secrets.sniffer.clone());
 
-    //TODO: clean up how we create this object and share it with the tokio threads.
-    // might have to refactor the object a bit
-    let discord_bot = Arc::new(RwLock::new(
-        discord::DiscordBot::new(secrets).await
-    ));
 
-    // Start our discord shard
-    { // closure so we drop the lock after we're done
-        let mut lock = discord_bot.write().await;
-        lock.start_shards(1).await;
-    }
+    let mut discord_bot = discord::DiscordBot::new(secrets).await;
+    discord_bot.start_shards(1).await;
     
 
+    // Clone discord bot to use in a thread
     let discord_bot_clone = discord_bot.clone();
     // Run in a loop to wait for the sniffer to strike again
     let run_token = tokio::spawn(async move {
@@ -80,10 +70,11 @@ async fn main() {
                     match message_opt {
                         Some(messages) => {
                             warn!("Got {} new messages", messages.len());
-                            let lock = discord_bot_clone.read().await;
+                            //let lock = discord_bot_clone.read().await;
                             for message in messages {
                                 warn!("New sniffer message!:\n{}", message);
-                                lock.post_message(message).await;
+                                //lock.post_message(message).await;
+                                discord_bot_clone.post_message(message).await;
                             }    
                         },
                         None => {
@@ -97,7 +88,9 @@ async fn main() {
             }
         }
     });
-    let discord_bot_clone = discord_bot.clone();
+
+    // Clone discord bot to use in a thread
+    let mut discord_bot_clone = discord_bot.clone();
     let future_wait = tokio::spawn(async move {
         select! {
             _ = wait_token(run_token) => {
@@ -106,13 +99,15 @@ async fn main() {
             _ = wait_sigint() => {
                 warn!("Got SIGINT");
                 // Kill our shards
-                discord_bot_clone.write().await.stop_shards().await;
+                //discord_bot_clone.write().await.stop_shards().await;
+                discord_bot_clone.stop_shards().await;
             }
         };
     });
 
 
-    discord_bot.clone().read().await.print_shard_info().await;
+    //discord_bot.clone().read().await.print_shard_info().await;
+    discord_bot.print_shard_info().await;
 
     println!("Ctrl-C to exit...");
     
