@@ -201,12 +201,12 @@ impl RedditScraper {
                         self.last_post_timestamp = p.timestamp;
                     }
                     None => {
-                        warn!("New sniffer post {}", p);
+                        debug!("New sniffer post {}", p);
                         // Fix and urls in the post's body
                         p.format_urls();
                         // record our new posts in the cache
                         self.post_cache.push(p.clone());
-                        warn!("Cached the new post");
+                        warn!("Cached a new post");
                         // Add our new posts
                         new_posts.push(p.clone());
                         // Update the most recent timestamp 
