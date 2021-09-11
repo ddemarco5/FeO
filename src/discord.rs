@@ -195,7 +195,7 @@ impl EventHandler for Handler {
                                         handle.play_only(audio);
                                         // Record our track object
                                         player_data.track_handle = Some(track_handle);
-                                        error!("Playing a track!");
+                                        warn!("Playing a track!");
                                     }
                                     None => {
                                         panic!("We should absolutely have a handle lock here, something is fucked");
