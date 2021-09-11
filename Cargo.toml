@@ -33,5 +33,6 @@ features = [
     #"standard_framework",
     "utils",
     "native_tls_backend",
+    "cache",
 ]
 version = "*"

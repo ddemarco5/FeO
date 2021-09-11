@@ -14,7 +14,7 @@ use serenity::{
     async_trait,
     prelude::*,
     model::{event::ResumedEvent, gateway::{Ready, Activity}},
-    model::channel::Message
+    model::channel::{Message, ChannelType, GuildChannel},
 };
 
 use songbird::{Songbird, Call};
@@ -22,6 +22,7 @@ use songbird::{Songbird, Call};
 use songbird::SerenityInit;
 use songbird::{ytdl, tracks::create_player};
 use songbird::tracks::{TrackHandle};
+use songbird::driver::Bitrate;
 
 // For our url regex matching
 use regex::Regex;
@@ -62,9 +63,6 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         warn!("Connected as {}, setting bot to online", ready.user.name);
         set_status(&ctx).await;
-        let data = ctx.data.read().await;
-        let call = data.get::<MusicHandler>().expect("Error getting call handler");
-        error!("Did we get our shit?:\n{:?}", call);
     }
 
     async fn resume(&self, ctx: Context, _: ResumedEvent) {
@@ -140,15 +138,13 @@ impl EventHandler for Handler {
                             static ref RE: Regex = Regex::new(r"https://\S*youtube\S*").unwrap();
                         }
     
-                        error!("{:?}", RE.captures(new_message.content.as_str()));
+                        //error!("{:?}", RE.captures(new_message.content.as_str()));
                         match RE.captures(new_message.content.as_str()) {
                             Some(r) => {
                                 warn!("Told to play");
-                                //let youtube_input = ytdl("https://www.youtube.com/watch?v=zFzCHsIXDhE").await.expect("Error creating ytdl input");
                                 let url_to_play = &r[0];
-                                let youtube_input = ytdl(url_to_play).await.expect("Error creating ytdl input");
-                                error!("YOUTUBE: {:?}", youtube_input);
-                                let (audio, track_handle) = create_player(youtube_input);
+                                // the bitrate we're going to use
+                                let mut bitrate = Bitrate::Auto;
                                 // Join our channel if we haven't yet
                                 match &player_data.call_handle_lock {
                                     Some(_) => {
@@ -157,21 +153,45 @@ impl EventHandler for Handler {
                                     }
                                     None => {
                                         // need to join
-                                        // These values are temporary, find a better place for them, me
-                                        let guild_id = songbird::id::GuildId::from(713563112728690689);
-                                        let channel_id = songbird::id::ChannelId::from(745482345099952129);
-                                        let user_id = songbird::id::UserId::from(842586247720861737);
-                                        let (handler_lock, conn_result) = player_data.songbird.join(guild_id, channel_id).await;
+
+                                        // Find who summoned us
+                                        let summoner = new_message.author;
+                                        warn!("{} ({}) is summoning", summoner.name, summoner.id);
+
+                                        let current_guild_id = new_message.guild_id.expect("No guild id in this message");
+                                        let mut voice_channels = current_guild_id.channels(ctx.http).await.unwrap().values().cloned().collect::<Vec<GuildChannel>>();
+                                        // remove all non-voice channels
+                                        voice_channels.retain(|x| x.kind == ChannelType::Voice);
+
+                                        let mut channel_id = ChannelId::from(0);
+                                        // Look for our members
+                                        for channel in voice_channels {
+                                            for member in channel.members(ctx.cache.clone()).await.unwrap() {
+                                                if member.user == summoner {
+                                                    channel_id = channel.id;
+                                                    warn!("found our summoner \"{}\" in channel \"{}\"", member.user.name, channel.name);
+                                                    warn!("bitrate is {}", channel.bitrate.unwrap());
+                                                    bitrate = Bitrate::BitsPerSecond(channel.bitrate.unwrap() as i32);
+                                                }
+                                            }
+                                        }
+                                        let (handler_lock, conn_result) = player_data.songbird.join(current_guild_id, channel_id).await;
                                         conn_result.expect("Error creating songbird call");
                                         player_data.call_handle_lock = Some(handler_lock);
                                     }
                                 }
-                                //audio.set_volume(0.2);
+                                // Create our player
+                                let youtube_input = ytdl(url_to_play).await.expect("Error creating ytdl input");
+                                let metadata = youtube_input.metadata.clone();
+                                warn!("Loaded up youtube: {} - {}", metadata.title.unwrap(), metadata.source_url.unwrap());
+                                //error!("YOUTUBE: {:?}", youtube_input);
+                                let (audio, track_handle) = create_player(youtube_input);
                                 // Closure for lock
                                 // Start playing our audio
                                 match &player_data.call_handle_lock {
                                     Some(p) => {
                                         let mut handle = p.lock().await;
+                                        handle.set_bitrate(bitrate);
                                         handle.play_only(audio);
                                         // Record our track object
                                         player_data.track_handle = Some(track_handle);
@@ -213,16 +233,6 @@ impl DiscordBot {
         let songbird = Songbird::serenity();
         warn!("Created songbird instance");
 
-        // Create a new songbird call to hang on to
-        // These values are temporary, find a better place for them, me
-        let guild_id = songbird::id::GuildId::from(713563112728690689);
-        let channel_id = songbird::id::ChannelId::from(745482345099952129);
-        let user_id = songbird::id::UserId::from(842586247720861737);
-        songbird.initialise_client_data(1, user_id);
-        //let (handler_lock, conn_result) = songbird.join(guild_id, channel_id).await;
-        //conn_result.expect("Error creating songbird call");
-        warn!("Instantiated discord call");
-
         // Create a new instance of the Client, logging in as a bot. This will
         // automatically prepend your bot token with "Bot ", which is a requirement
         // by Discord for bot users.
@@ -242,6 +252,9 @@ impl DiscordBot {
                 }
             )
         }
+        // Pull our bot user id and initialize songbird with it
+        let bot_user_id = serenity_bot.cache_and_http.http.get_current_user().await.expect("couldn't get current user").id;
+        songbird.initialise_client_data(1, bot_user_id);
         // Get a shared ref of our http cache so we can use it to send messages in an async fashion
         let http = serenity_bot.cache_and_http.http.clone();
         // And for shard manager too
