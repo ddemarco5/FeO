@@ -100,7 +100,7 @@ async fn main() {
                 warn!("Got SIGINT");
                 // Kill our shards
                 //discord_bot_clone.write().await.stop_shards().await;
-                discord_bot_clone.stop_shards().await;
+                discord_bot_clone.shutdown().await;
             }
         };
     });

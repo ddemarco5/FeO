@@ -18,6 +18,8 @@ serde_yaml = "*"
 regex = "*"
 lazy_static = "*"
 futures-locks = "*"
+#songbird = { version = "0.2.0", features = ["youtube-dlc"] }
+songbird = "0.2.0"
 
 [dependencies.serenity]
 default-features = false

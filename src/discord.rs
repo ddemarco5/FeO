@@ -13,8 +13,18 @@ use serenity::{
     client::{Client, bridge::gateway::ShardManager},
     async_trait,
     prelude::*,
-    model::{event::ResumedEvent, gateway::{Ready, Activity}}
+    model::{event::ResumedEvent, gateway::{Ready, Activity}},
+    model::channel::Message
 };
+
+use songbird::{Songbird, Call};
+// Enable songbird register trait for serenity
+use songbird::SerenityInit;
+use songbird::{ytdl, tracks::create_player};
+use songbird::tracks::{TrackHandle};
+
+// For our url regex matching
+use regex::Regex;
 
 
 pub struct DiscordBot {
@@ -26,20 +36,129 @@ pub struct DiscordBot {
     chat_channel: ChannelId,
     test_channel: ChannelId,
     archive_channel: ChannelId,
+    songbird_instance: Option<Arc<Songbird>>,
+    call_handle_lock: Option<Arc<Mutex<Call>>>,
+}
+
+#[derive(Debug, Clone)]
+struct PlayerData {
+    call_handle_lock: Arc<Mutex<Call>>,
+    //track_handle_lock: Option<Arc<Mutex<TrackHandle>>>,
+    track_handle: Option<TrackHandle>,
+}
+
+struct MusicHandler;
+
+impl TypeMapKey for MusicHandler {
+    type Value = PlayerData;
 }
 
 struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
+
     async fn ready(&self, ctx: Context, ready: Ready) {
         warn!("Connected as {}, setting bot to online", ready.user.name);
         set_status(&ctx).await;
+        let data = ctx.data.read().await;
+        let call = data.get::<MusicHandler>().expect("Error getting call handler");
+        error!("Did we get our shit?:\n{:?}", call);
     }
 
     async fn resume(&self, ctx: Context, _: ResumedEvent) {
         warn!("Resumed (reconnected)");
         set_status(&ctx).await;
+    }
+
+    async fn message(&self, ctx: Context, new_message: Message) {
+
+        if new_message.channel_id == ChannelId::from(766900346202882058) {
+            // TODO: It'd be best not to get a lock on every message coming into this channel
+            // but for right now we should be okay
+            let mut data = ctx.data.write().await;
+            let mut player_data = data.get_mut::<MusicHandler>().expect("Error getting call handler");
+            match new_message.content.as_str() {
+                "leave" => {
+                    warn!("Told to leave");
+                    {
+                        let mut call_handler = player_data.call_handle_lock.lock().await;
+                        call_handler.leave().await.expect("Error leaving call");
+                    }
+                }
+                "stop" => {
+                    warn!("Told to stop");
+                    match &player_data.track_handle {
+                        Some(h) => {
+                            h.stop().expect("Error stopping track");
+                            // Wipe our track handle
+                            player_data.track_handle = None;
+                        }
+                        None => {
+                            warn!("Told to stop, but not playing anything")
+                        }
+                    }
+                }
+                "pause" => {
+                    warn!("Told to pause");
+                    match &player_data.track_handle {
+                        Some(h) => {
+                            h.pause().expect("Error pausing track");
+                        }
+                        None => {
+                            warn!("Told to pause, but not playing anything")
+                        }
+                    }
+                }
+                "resume" => {
+                    warn!("Told to resume");
+                    match &player_data.track_handle {
+                        Some(h) => {
+                            h.play().expect("Error resuming track");
+                        }
+                        None => {
+                            warn!("Told to resume, but not playing anything")
+                        }
+                    }
+                }
+                // Do our play matching below because "match" doesn't play well with contains
+                _ => {
+                    if new_message.content.contains("play") {
+                        lazy_static! {
+                            // Returns the whole string to replace in the first capture, contents of [] in 2nd and () in 3rd
+                            static ref RE: Regex = Regex::new(r"https://\S*").unwrap();
+                        }
+    
+                        error!("{:?}", RE.captures(new_message.content.as_str()));
+                        match RE.captures(new_message.content.as_str()) {
+                            Some(r) => {
+                                warn!("Told to play");
+                                //let youtube_input = ytdl("https://www.youtube.com/watch?v=zFzCHsIXDhE").await.expect("Error creating ytdl input");
+                                let url_to_play = &r[0];
+                                let youtube_input = ytdl(url_to_play).await.expect("Error creating ytdl input");
+                                error!("YOUTUBE: {:?}", youtube_input);
+                                let (mut audio, track_handle) = create_player(youtube_input);
+                                audio.set_volume(0.2);
+                                // Closure for lock
+                                // Start playing our audio
+                                let mut handle = player_data.call_handle_lock.lock().await;
+                                handle.play_only(audio);
+            
+                                // Record our track object
+                                player_data.track_handle = Some(track_handle);
+                                error!("Playing a track!");
+                            }
+                            None => {
+                                error!("told to play, but nothing given");
+                            }
+                        }
+                    }
+                    else {
+                        error!("We got a message here, but it isn't any we are interested in");
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -56,13 +175,38 @@ impl DiscordBot {
         // Configure the client with your Discord bot token in the environment.
         let token = secrets.bot_token;
 
+        // Create a songbird instance
+        let songbird = Songbird::serenity();
+        warn!("Created songbird instance");
+
+        // Create a new songbird call to hang on to
+        // These values are temporary, find a better place for them, me
+        let guild_id = songbird::id::GuildId::from(713563112728690689);
+        let channel_id = songbird::id::ChannelId::from(745482345099952129);
+        let user_id = songbird::id::UserId::from(842586247720861737);
+        songbird.initialise_client_data(1, user_id);
+        let (handler_lock, conn_result) = songbird.join(guild_id, channel_id).await;
+        conn_result.expect("Error creating songbird call");
+        warn!("Instantiated discord call");
+
         // Create a new instance of the Client, logging in as a bot. This will
         // automatically prepend your bot token with "Bot ", which is a requirement
         // by Discord for bot users.
         let serenity_bot = Client::builder(&token)
             .event_handler(Handler)
+            .register_songbird_with(songbird.clone())
             .await
             .expect("Error creating client");
+        {
+            let mut data = serenity_bot.data.write().await;
+            //data.insert::<MusicHandler>(handler_lock.clone())
+            data.insert::<MusicHandler>(
+                PlayerData {
+                    call_handle_lock: handler_lock.clone(),
+                    track_handle: None,
+                }
+            )
+        }
         // Get a shared ref of our http cache so we can use it to send messages in an async fashion
         let http = serenity_bot.cache_and_http.http.clone();
         // And for shard manager too
@@ -76,6 +220,8 @@ impl DiscordBot {
                 chat_channel: ChannelId(secrets.main_channel), // main channel
                 test_channel: ChannelId(secrets.test_channel),
                 archive_channel: ChannelId(secrets.archive_channel), // the archive channel
+                songbird_instance: Some(songbird),
+                call_handle_lock: Some(handler_lock),
             };
 
         return bot;
@@ -112,7 +258,36 @@ impl DiscordBot {
         }
     }
 
-    pub async fn stop_shards(&mut self) {
+    pub async fn shutdown(&mut self) {
+        self.stop_audio().await;
+        self.stop_shards().await;
+    }
+
+    async fn stop_audio(&self) {  
+
+        match self.call_handle_lock.as_ref() {
+            Some(h) => {
+                error!("Leaving call");
+                //error!("BEFORE: {:?}", self.call_handle_lock);
+                {
+                    let mut handler = h.lock().await;
+                    handler.leave().await.expect("Error leaving call");
+                }
+                // This is dumb as hell, but if we don't wait a little bit we'll remove the shards
+                // before it has a chance to leave, they should really have a leave_blocking function
+                // There's nothing we can poll to check to see if we've fully left either, the
+                // associated structs reflect the state immediately
+
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                //error!("AFTER: {:?}", self.call_handle_lock);
+            }
+            None => {
+                error!("No call handle, nothing to hang up on");
+            }
+        }
+    }
+
+    async fn stop_shards(&mut self) {
         // Start the cancel
         self.shard_cancel_token.cancel();
         // Wait on our handle
@@ -149,6 +324,56 @@ impl DiscordBot {
         self.archive_channel.say(&http, message_text).await.expect("Error sending message to archive");
     }
 
+    /*
+    pub async fn songbird_test(&mut self) {
+        error!("{:?}", self.songbird_instance);
+        // Try to join a server by id
+        let guild_id = songbird::id::GuildId::from(713563112728690689);
+        let channel_id = songbird::id::ChannelId::from(745482345099952129);
+        let user_id = songbird::id::UserId::from(842586247720861737);
+
+        self.songbird_instance.as_ref().unwrap().initialise_client_data(1, user_id);
+        error!("SONGBIRD: {:?}", self.songbird_instance.as_ref().unwrap());
+        // try to join the call
+        let (handler_lock, conn_result) = self.songbird_instance.as_ref().unwrap().join(guild_id, channel_id).await;
+
+        // Put the lock in our main struct
+        self.call_handle_lock = Some(handler_lock.clone());
+        error!("TEST: {:?}", self.call_handle_lock);
+        
+        match conn_result {
+            Ok(_) => {
+                error!("We connected to the voice channel!");
+
+                let youtube_input = ytdl("https://www.youtube.com/watch?v=zFzCHsIXDhE").await.expect("Error creating ytdl input");
+                error!("YOUTUBE: {:?}", youtube_input);
+                let (mut audio, audio_handle) = create_player(youtube_input);
+                // Closure for lock
+                {
+                    let mut handler = handler_lock.lock().await;
+                    audio.set_volume(0.2);
+                    handler.play_only(audio);
+                }
+                
+                //std::thread::sleep_ms(10000);
+                //audio_handle.stop().expect("Error stopping audio");
+                //std::thread::sleep_ms(5000);
+
+                // Another closure for lock
+                //{
+                //    let mut handler = handler_lock.lock().await;
+                //    handler.leave().await.expect("Error leaving call");
+                //}
+
+            }
+            Err(_) => {
+                error!("Error connecting to the voice channel!");
+            }
+        }
+        
+    }
+    */
+
     #[allow(dead_code)]
     pub async fn post_debug_string(&self, message: String) {
         let http = &self.bot_http;
@@ -174,6 +399,8 @@ impl Clone for DiscordBot {
             chat_channel: self.chat_channel.clone(),
             test_channel: self.test_channel.clone(),
             archive_channel: self.archive_channel.clone(),
+            songbird_instance: self.songbird_instance.clone(),
+            call_handle_lock: self.call_handle_lock.clone(),
         }
     }
 }
