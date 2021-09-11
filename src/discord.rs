@@ -175,9 +175,16 @@ impl EventHandler for Handler {
                                                 }
                                             }
                                         }
-                                        let (handler_lock, conn_result) = player_data.songbird.join(current_guild_id, channel_id).await;
-                                        conn_result.expect("Error creating songbird call");
-                                        player_data.call_handle_lock = Some(handler_lock);
+                                        if *channel_id.as_u64() != (0 as u64) {
+                                            let (handler_lock, conn_result) = player_data.songbird.join(current_guild_id, channel_id).await;
+                                            conn_result.expect("Error creating songbird call");
+                                            player_data.call_handle_lock = Some(handler_lock);
+                                        }
+                                        else {
+                                            error!("we couldn't find our guy");
+                                            return;
+                                        }
+                                        
                                     }
                                 }
                                 // Create our player
