@@ -37,14 +37,15 @@ pub struct DiscordBot {
     test_channel: ChannelId,
     archive_channel: ChannelId,
     songbird_instance: Option<Arc<Songbird>>,
-    call_handle_lock: Option<Arc<Mutex<Call>>>,
+    //call_handle_lock: Option<Arc<Mutex<Call>>>,
 }
 
 #[derive(Debug, Clone)]
 struct PlayerData {
-    call_handle_lock: Arc<Mutex<Call>>,
+    call_handle_lock: Option<Arc<Mutex<Call>>>,
     //track_handle_lock: Option<Arc<Mutex<TrackHandle>>>,
     track_handle: Option<TrackHandle>,
+    songbird: Arc<Songbird>,
 }
 
 struct MusicHandler;
@@ -81,9 +82,19 @@ impl EventHandler for Handler {
             match new_message.content.as_str() {
                 "leave" => {
                     warn!("Told to leave");
-                    {
-                        let mut call_handler = player_data.call_handle_lock.lock().await;
-                        call_handler.leave().await.expect("Error leaving call");
+                    match &player_data.call_handle_lock {
+                        Some(h) => {
+                            {
+                                let mut call_handler = h.lock().await;
+                                call_handler.leave().await.expect("Error leaving call");
+                            }
+                            // Wipe everything
+                            player_data.call_handle_lock = None;
+                            player_data.track_handle = None;
+                        }
+                        None => {
+                            error!("Told do leave but we weren't here");
+                        }
                     }
                 }
                 "stop" => {
@@ -126,7 +137,7 @@ impl EventHandler for Handler {
                     if new_message.content.contains("play") {
                         lazy_static! {
                             // Returns the whole string to replace in the first capture, contents of [] in 2nd and () in 3rd
-                            static ref RE: Regex = Regex::new(r"https://\S*").unwrap();
+                            static ref RE: Regex = Regex::new(r"https://\S*youtube\S*").unwrap();
                         }
     
                         error!("{:?}", RE.captures(new_message.content.as_str()));
@@ -137,16 +148,39 @@ impl EventHandler for Handler {
                                 let url_to_play = &r[0];
                                 let youtube_input = ytdl(url_to_play).await.expect("Error creating ytdl input");
                                 error!("YOUTUBE: {:?}", youtube_input);
-                                let (mut audio, track_handle) = create_player(youtube_input);
-                                audio.set_volume(0.2);
+                                let (audio, track_handle) = create_player(youtube_input);
+                                // Join our channel if we haven't yet
+                                match &player_data.call_handle_lock {
+                                    Some(_) => {
+                                        // already here
+                                        warn!("We're already in the call, just start playing");
+                                    }
+                                    None => {
+                                        // need to join
+                                        // These values are temporary, find a better place for them, me
+                                        let guild_id = songbird::id::GuildId::from(713563112728690689);
+                                        let channel_id = songbird::id::ChannelId::from(745482345099952129);
+                                        let user_id = songbird::id::UserId::from(842586247720861737);
+                                        let (handler_lock, conn_result) = player_data.songbird.join(guild_id, channel_id).await;
+                                        conn_result.expect("Error creating songbird call");
+                                        player_data.call_handle_lock = Some(handler_lock);
+                                    }
+                                }
+                                //audio.set_volume(0.2);
                                 // Closure for lock
                                 // Start playing our audio
-                                let mut handle = player_data.call_handle_lock.lock().await;
-                                handle.play_only(audio);
-            
-                                // Record our track object
-                                player_data.track_handle = Some(track_handle);
-                                error!("Playing a track!");
+                                match &player_data.call_handle_lock {
+                                    Some(p) => {
+                                        let mut handle = p.lock().await;
+                                        handle.play_only(audio);
+                                        // Record our track object
+                                        player_data.track_handle = Some(track_handle);
+                                        error!("Playing a track!");
+                                    }
+                                    None => {
+                                        panic!("We should absolutely have a handle lock here, something is fucked");
+                                    }
+                                }  
                             }
                             None => {
                                 error!("told to play, but nothing given");
@@ -185,8 +219,8 @@ impl DiscordBot {
         let channel_id = songbird::id::ChannelId::from(745482345099952129);
         let user_id = songbird::id::UserId::from(842586247720861737);
         songbird.initialise_client_data(1, user_id);
-        let (handler_lock, conn_result) = songbird.join(guild_id, channel_id).await;
-        conn_result.expect("Error creating songbird call");
+        //let (handler_lock, conn_result) = songbird.join(guild_id, channel_id).await;
+        //conn_result.expect("Error creating songbird call");
         warn!("Instantiated discord call");
 
         // Create a new instance of the Client, logging in as a bot. This will
@@ -202,8 +236,9 @@ impl DiscordBot {
             //data.insert::<MusicHandler>(handler_lock.clone())
             data.insert::<MusicHandler>(
                 PlayerData {
-                    call_handle_lock: handler_lock.clone(),
+                    call_handle_lock: None,
                     track_handle: None,
+                    songbird: songbird.clone(),
                 }
             )
         }
@@ -221,7 +256,7 @@ impl DiscordBot {
                 test_channel: ChannelId(secrets.test_channel),
                 archive_channel: ChannelId(secrets.archive_channel), // the archive channel
                 songbird_instance: Some(songbird),
-                call_handle_lock: Some(handler_lock),
+                //call_handle_lock: Some(handler_lock),
             };
 
         return bot;
@@ -259,16 +294,22 @@ impl DiscordBot {
     }
 
     pub async fn shutdown(&mut self) {
+        //self.stop_audio().await;
+        self.stop_shards().await; // we hold a write lock on serenity here, it's its run future
         self.stop_audio().await;
-        self.stop_shards().await;
     }
 
     async fn stop_audio(&self) {  
 
-        match self.call_handle_lock.as_ref() {
+        //match self.call_handle_lock.as_ref() {
+        //let data =  self.songbird_instance.as_ref().unwrap().data.read().await;
+        //let mut player_data = data.get::<MusicHandler>().expect("Error getting call handler");
+        let serenity_lock = self.serenity_bot.read().await;
+        let mut data = serenity_lock.data.write().await;
+        let player_data = data.get_mut::<MusicHandler>().expect("Error getting call handler");
+        match &player_data.call_handle_lock {
             Some(h) => {
                 error!("Leaving call");
-                //error!("BEFORE: {:?}", self.call_handle_lock);
                 {
                     let mut handler = h.lock().await;
                     handler.leave().await.expect("Error leaving call");
@@ -279,7 +320,6 @@ impl DiscordBot {
                 // associated structs reflect the state immediately
 
                 std::thread::sleep(std::time::Duration::from_millis(500));
-                //error!("AFTER: {:?}", self.call_handle_lock);
             }
             None => {
                 error!("No call handle, nothing to hang up on");
@@ -400,7 +440,7 @@ impl Clone for DiscordBot {
             test_channel: self.test_channel.clone(),
             archive_channel: self.archive_channel.clone(),
             songbird_instance: self.songbird_instance.clone(),
-            call_handle_lock: self.call_handle_lock.clone(),
+            //call_handle_lock: self.call_handle_lock.clone(),
         }
     }
 }
