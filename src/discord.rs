@@ -1,6 +1,7 @@
 // For sniffer post struct
 use crate::reddit::SnifferPost;
 use crate::Secrets;
+use crate::player::{AudioPlayer, MusicHandler, PlayerData};
 
 use std::sync::Arc;
 use tokio::select;
@@ -17,15 +18,9 @@ use serenity::{
     model::channel::{Message, ChannelType, GuildChannel},
 };
 
-use songbird::{Songbird, Call};
 // Enable songbird register trait for serenity
 use songbird::SerenityInit;
-use songbird::{ytdl, tracks::create_player};
-use songbird::tracks::{TrackHandle};
-use songbird::driver::Bitrate;
-
-// For our url regex matching
-use regex::Regex;
+use songbird::Songbird;
 
 
 pub struct DiscordBot {
@@ -37,196 +32,8 @@ pub struct DiscordBot {
     chat_channel: ChannelId,
     test_channel: ChannelId,
     archive_channel: ChannelId,
-    songbird_instance: Option<Arc<Songbird>>,
-    //call_handle_lock: Option<Arc<Mutex<Call>>>,
-}
-
-#[derive(Debug, Clone)]
-struct PlayerData {
-    call_handle_lock: Option<Arc<Mutex<Call>>>,
-    //track_handle_lock: Option<Arc<Mutex<TrackHandle>>>,
-    track_handle: Option<TrackHandle>,
-    songbird: Arc<Songbird>,
-}
-
-struct MusicHandler;
-
-impl TypeMapKey for MusicHandler {
-    type Value = PlayerData;
-}
-
-struct Handler;
-
-#[async_trait]
-impl EventHandler for Handler {
-
-    async fn ready(&self, ctx: Context, ready: Ready) {
-        warn!("Connected as {}, setting bot to online", ready.user.name);
-        set_status(&ctx).await;
-    }
-
-    async fn resume(&self, ctx: Context, _: ResumedEvent) {
-        warn!("Resumed (reconnected)");
-        set_status(&ctx).await;
-    }
-
-    async fn message(&self, ctx: Context, new_message: Message) {
-
-        if new_message.channel_id == ChannelId::from(766900346202882058) {
-            // TODO: It'd be best not to get a lock on every message coming into this channel
-            // but for right now we should be okay
-            let mut data = ctx.data.write().await;
-            let mut player_data = data.get_mut::<MusicHandler>().expect("Error getting call handler");
-            match new_message.content.as_str() {
-                "leave" => {
-                    warn!("Told to leave");
-                    match &player_data.call_handle_lock {
-                        Some(h) => {
-                            {
-                                let mut call_handler = h.lock().await;
-                                call_handler.leave().await.expect("Error leaving call");
-                            }
-                            // Wipe everything
-                            player_data.call_handle_lock = None;
-                            player_data.track_handle = None;
-                        }
-                        None => {
-                            error!("Told do leave but we weren't here");
-                        }
-                    }
-                }
-                "stop" => {
-                    warn!("Told to stop");
-                    match &player_data.track_handle {
-                        Some(h) => {
-                            h.stop().expect("Error stopping track");
-                            // Wipe our track handle
-                            player_data.track_handle = None;
-                        }
-                        None => {
-                            warn!("Told to stop, but not playing anything")
-                        }
-                    }
-                }
-                "pause" => {
-                    warn!("Told to pause");
-                    match &player_data.track_handle {
-                        Some(h) => {
-                            h.pause().expect("Error pausing track");
-                        }
-                        None => {
-                            warn!("Told to pause, but not playing anything")
-                        }
-                    }
-                }
-                "resume" => {
-                    warn!("Told to resume");
-                    match &player_data.track_handle {
-                        Some(h) => {
-                            h.play().expect("Error resuming track");
-                        }
-                        None => {
-                            warn!("Told to resume, but not playing anything")
-                        }
-                    }
-                }
-                // Do our play matching below because "match" doesn't play well with contains
-                _ => {
-                    if new_message.content.contains("play") {
-                        lazy_static! {
-                            // Returns the whole string to replace in the first capture, contents of [] in 2nd and () in 3rd
-                            static ref RE: Regex = Regex::new(r"https://\S*youtube\S*").unwrap();
-                        }
-    
-                        //error!("{:?}", RE.captures(new_message.content.as_str()));
-                        match RE.captures(new_message.content.as_str()) {
-                            Some(r) => {
-                                warn!("Told to play");
-                                let url_to_play = &r[0];
-                                // the bitrate we're going to use
-                                let mut bitrate = Bitrate::Auto;
-                                // Join our channel if we haven't yet
-                                match &player_data.call_handle_lock {
-                                    Some(_) => {
-                                        // already here
-                                        warn!("We're already in the call, just start playing");
-                                    }
-                                    None => {
-                                        // need to join
-
-                                        // Find who summoned us
-                                        let summoner = new_message.author;
-                                        warn!("{} ({}) is summoning", summoner.name, summoner.id);
-
-                                        let current_guild_id = new_message.guild_id.expect("No guild id in this message");
-                                        let mut voice_channels = current_guild_id.channels(ctx.http).await.unwrap().values().cloned().collect::<Vec<GuildChannel>>();
-                                        // remove all non-voice channels
-                                        voice_channels.retain(|x| x.kind == ChannelType::Voice);
-
-                                        let mut channel_id = ChannelId::from(0);
-                                        // Look for our members
-                                        for channel in voice_channels {
-                                            for member in channel.members(ctx.cache.clone()).await.unwrap() {
-                                                if member.user == summoner {
-                                                    channel_id = channel.id;
-                                                    warn!("found our summoner \"{}\" in channel \"{}\"", member.user.name, channel.name);
-                                                    warn!("bitrate is {}", channel.bitrate.unwrap());
-                                                    bitrate = Bitrate::BitsPerSecond(channel.bitrate.unwrap() as i32);
-                                                }
-                                            }
-                                        }
-                                        if *channel_id.as_u64() != (0 as u64) {
-                                            let (handler_lock, conn_result) = player_data.songbird.join(current_guild_id, channel_id).await;
-                                            conn_result.expect("Error creating songbird call");
-                                            player_data.call_handle_lock = Some(handler_lock);
-                                        }
-                                        else {
-                                            error!("we couldn't find our guy");
-                                            return;
-                                        }
-                                        
-                                    }
-                                }
-                                // Create our player
-                                let youtube_input = ytdl(url_to_play).await.expect("Error creating ytdl input");
-                                let metadata = youtube_input.metadata.clone();
-                                warn!("Loaded up youtube: {} - {}", metadata.title.unwrap(), metadata.source_url.unwrap());
-                                //error!("YOUTUBE: {:?}", youtube_input);
-                                let (audio, track_handle) = create_player(youtube_input);
-                                // Closure for lock
-                                // Start playing our audio
-                                match &player_data.call_handle_lock {
-                                    Some(p) => {
-                                        let mut handle = p.lock().await;
-                                        handle.set_bitrate(bitrate);
-                                        handle.play_only(audio);
-                                        // Record our track object
-                                        player_data.track_handle = Some(track_handle);
-                                        warn!("Playing a track!");
-                                    }
-                                    None => {
-                                        panic!("We should absolutely have a handle lock here, something is fucked");
-                                    }
-                                }  
-                            }
-                            None => {
-                                error!("told to play, but nothing given");
-                            }
-                        }
-                    }
-                    else {
-                        error!("We got a message here, but it isn't any we are interested in");
-                    }
-                }
-            }
-        }
-    }
-}
-
-// The reset presence and activity action for both ready and result
-async fn set_status(ctx: &Context) {
-    ctx.reset_presence().await;
-    ctx.set_activity(Activity::watching("the sniffer")).await;
+    //songbird_instance: Option<Arc<Songbird>>,
+    //audio_player: Option<AudioPlayer>,
 }
 
 impl DiscordBot {
@@ -237,31 +44,28 @@ impl DiscordBot {
         let token = secrets.bot_token;
 
         // Create a songbird instance
-        let songbird = Songbird::serenity();
-        warn!("Created songbird instance");
+        let audioplayer = AudioPlayer::new();
+        warn!("Created audio player instance");
+        let songbird_handle = audioplayer.songbird();
 
         // Create a new instance of the Client, logging in as a bot. This will
         // automatically prepend your bot token with "Bot ", which is a requirement
         // by Discord for bot users.
         let serenity_bot = Client::builder(&token)
-            .event_handler(Handler)
-            .register_songbird_with(songbird.clone())
+            .event_handler(audioplayer)
+            .register_songbird_with(songbird_handle.clone())
             .await
             .expect("Error creating client");
         {
             let mut data = serenity_bot.data.write().await;
             //data.insert::<MusicHandler>(handler_lock.clone())
             data.insert::<MusicHandler>(
-                PlayerData {
-                    call_handle_lock: None,
-                    track_handle: None,
-                    songbird: songbird.clone(),
-                }
+                PlayerData::new(songbird_handle.clone())
             )
         }
         // Pull our bot user id and initialize songbird with it
         let bot_user_id = serenity_bot.cache_and_http.http.get_current_user().await.expect("couldn't get current user").id;
-        songbird.initialise_client_data(1, bot_user_id);
+        songbird_handle.initialise_client_data(1, bot_user_id);
         // Get a shared ref of our http cache so we can use it to send messages in an async fashion
         let http = serenity_bot.cache_and_http.http.clone();
         // And for shard manager too
@@ -275,7 +79,8 @@ impl DiscordBot {
                 chat_channel: ChannelId(secrets.main_channel), // main channel
                 test_channel: ChannelId(secrets.test_channel),
                 archive_channel: ChannelId(secrets.archive_channel), // the archive channel
-                songbird_instance: Some(songbird),
+                //songbird_instance: Some(songbird_handle.clone()),
+                //audio_player: Some(audioplayer),
                 //call_handle_lock: Some(handler_lock),
             };
 
@@ -316,9 +121,10 @@ impl DiscordBot {
     pub async fn shutdown(&mut self) {
         //self.stop_audio().await;
         self.stop_shards().await; // we hold a write lock on serenity here, it's its run future
-        self.stop_audio().await;
+        //self.stop_audio().await;
     }
 
+    /*
     async fn stop_audio(&self) {  
 
         //match self.call_handle_lock.as_ref() {
@@ -346,6 +152,7 @@ impl DiscordBot {
             }
         }
     }
+    */
 
     async fn stop_shards(&mut self) {
         // Start the cancel
@@ -459,7 +266,7 @@ impl Clone for DiscordBot {
             chat_channel: self.chat_channel.clone(),
             test_channel: self.test_channel.clone(),
             archive_channel: self.archive_channel.clone(),
-            songbird_instance: self.songbird_instance.clone(),
+            //songbird_instance: self.songbird_instance.clone(),
             //call_handle_lock: self.call_handle_lock.clone(),
         }
     }
