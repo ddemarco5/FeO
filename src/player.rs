@@ -66,6 +66,75 @@ impl AudioPlayer {
         }
     }
 
+    pub fn set_call_handle(&self, new_handle: Arc<Mutex<Call>>) {
+        let mut data = tokio::task::block_in_place(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+            self.player_data.write().await
+            })
+        });
+        data.call_handle_lock = Some(new_handle);
+
+    }
+
+    pub fn clear_call_handle(&self) {
+        let mut data = tokio::task::block_in_place(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+            self.player_data.write().await
+            })
+        });
+        data.call_handle_lock = None;
+    }
+
+    pub fn set_track_handle(&self, new_handle: TrackHandle) {
+        let mut data = tokio::task::block_in_place(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+            self.player_data.write().await
+            })
+        });
+        data.track_handle = Some(new_handle);
+    }
+
+    pub fn clear_track_handle(&self) {
+        let mut data = tokio::task::block_in_place(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+            self.player_data.write().await
+            })
+        });
+        data.track_handle = None;
+    }
+
+    pub fn get_call_handle(&self) -> Option<Arc<Mutex<Call>>> {
+        let data = tokio::task::block_in_place(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+            self.player_data.read().await
+            })
+        });
+        match &data.call_handle_lock {
+            Some(c) => {
+                return Some(c.clone());
+            }
+            None => {
+                return None;
+            }
+        }
+    }
+
+    pub fn get_track_handle(&self) -> Option<TrackHandle> {
+        let data = tokio::task::block_in_place(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+            self.player_data.read().await
+            })
+        });
+        match &data.track_handle {
+            Some(t) => {
+                return Some(t.clone());
+            }
+            None => {
+                return None;
+            }
+        }
+    }
+
     pub fn songbird(&self) -> Arc<Songbird> {
         return self.songbird.clone()
     }
@@ -91,13 +160,13 @@ impl AudioPlayer {
             Some(r) => {
                 warn!("Told to play");
 
-                let mut player_data = self.player_data.write().await;
+                //let mut player_data = self.player_data.write().await;
 
                 let url_to_play = &r[0];
                 // the bitrate we're going to use
                 let mut bitrate = Bitrate::Auto;
                 // Join our channel if we haven't yet
-                match &player_data.call_handle_lock {
+                match self.get_call_handle() {
                     Some(_) => {
                         // already here
                         warn!("We're already in the call, just start playing");
@@ -130,7 +199,8 @@ impl AudioPlayer {
                             let (handler_lock, conn_result) = self.songbird.join(current_guild_id, channel_id).await;
                             conn_result.expect("Error creating songbird call");
                             // Record our call handle
-                            player_data.call_handle_lock = Some(handler_lock);
+                            //player_data.call_handle_lock = Some(handler_lock);
+                            self.set_call_handle(handler_lock);
                         }
                         else {
                             error!("we couldn't find our guy");
@@ -138,8 +208,6 @@ impl AudioPlayer {
                         }   
                     }
                 }
-                // drop our write lock before the super long process of pulling a video
-                drop(player_data);
             
                 // Create our player
                 let youtube_input = ytdl(url_to_play).await.expect("Error creating ytdl input");
@@ -154,11 +222,13 @@ impl AudioPlayer {
                     }
                 ).expect("Failed to add handle to track");
                 // Record our track object
-                let mut player_data = self.player_data.write().await; // lock it again
-                player_data.track_handle = Some(track_handle);
+                //player_data.track_handle = Some(track_handle);
+                self.set_track_handle(track_handle);
             
                 // Start playing our audio
-                let mut call_handle = player_data.call_handle_lock.as_ref().expect("Absolutely should have lock here").lock().await;
+                let call_handle_lock = self.get_call_handle();
+                //let mut call_handle = self.player_data.read().await.call_handle_lock.as_ref().expect("Absolutely should have lock here").lock().await;
+                let mut call_handle = call_handle_lock.as_ref().expect("Absolutely should have lock here").lock().await;
                 call_handle.set_bitrate(bitrate);
                 call_handle.play_only(audio);
 
@@ -189,22 +259,24 @@ impl EventHandler for AudioPlayer {
             //let mut data = ctx.data.write().await;
             //let mut player_data = data.get_mut::<MusicHandler>().expect("Error getting call handler");
             // Get the lock on our data so we can modify it
-            //let player_data_r = self.player_data.read().await;
+            //let player_data = self.player_data.write().await;
             match new_message.content.as_str() {
                 "leave" => {
                     warn!("Told to leave");
-                    match { &self.player_data.read().await.call_handle_lock } {
+                    match self.get_call_handle() {
                         Some(h) => {
                             {
                                 let mut call_handler = h.lock().await;
                                 call_handler.leave().await.expect("Error leaving call");
                             }
                             // Wipe everything
-                            {
-                                let mut player_data = self.player_data.write().await;
-                                player_data.call_handle_lock = None;
-                                player_data.track_handle = None;
-                            }
+                            //{
+                            //    let mut player_data = self.player_data.write().await;
+                            //    player_data.call_handle_lock = None;
+                            //    player_data.track_handle = None;
+                            //}
+                            self.clear_track_handle();
+                            self.clear_call_handle();
                         }
                         None => {
                             error!("Told do leave but we weren't here");
@@ -213,23 +285,25 @@ impl EventHandler for AudioPlayer {
                 }
                 "stop" => {
                     warn!("Told to stop");
-                    match { &self.player_data.read().await.track_handle } {
+                    match self.get_track_handle() {
                         Some(h) => {
                             h.stop().expect("Error stopping track");
                             // Wipe our track handle
-                            {
-                                let mut player_data = self.player_data.write().await;
-                                player_data.track_handle = None;
-                            }
+                            //{
+                            //    let mut player_data = self.player_data.write().await;
+                            //    player_data.track_handle = None;
+                            //}
+                            self.clear_track_handle();
                         }
                         None => {
                             warn!("Told to stop, but not playing anything")
                         }
                     }
+                    warn!("Stopped track");
                 }
                 "pause" => {
                     warn!("Told to pause");
-                    match { &self.player_data.read().await.track_handle } {
+                    match self.get_track_handle() {
                         Some(h) => {
                             h.pause().expect("Error pausing track");
                         }
@@ -237,10 +311,11 @@ impl EventHandler for AudioPlayer {
                             warn!("Told to pause, but not playing anything")
                         }
                     }
+                    warn!("Paused track");
                 }
                 "resume" => {
                     warn!("Told to resume");
-                    match { &self.player_data.read().await.track_handle } {
+                    match self.get_track_handle() {
                         Some(h) => {
                             h.play().expect("Error resuming track");
                         }
@@ -248,6 +323,7 @@ impl EventHandler for AudioPlayer {
                             warn!("Told to resume, but not playing anything")
                         }
                     }
+                    warn!("Resumed track");
                 }
                 // Do our play matching below because "match" doesn't play well with contains
                 _ => {
@@ -282,7 +358,8 @@ impl SongBirdEventHandler for TrackEndCallback {
         std::thread::sleep(std::time::Duration::from_secs(30));
 
         // Make sure we're still in a call
-        let mut player_data = self.player_data.write().await;
+        let mut player_data = self.player_data.try_write().expect("Failed to get the write in callback!");
+        error!("Got lock");
         if player_data.call_handle_lock.is_none() {
             // We're not in a call anymore, get out of this routine
             return None;
@@ -290,12 +367,16 @@ impl SongBirdEventHandler for TrackEndCallback {
 
         // Check to see if we're playing anything
         match &player_data.track_handle {
+            // We have a track handle
             Some(h) => {
                 warn!("We've still got a track handle... seeing if its playing");
+                // See if our track handle is active
                 match h.get_info().await {
                     Ok(_) => {
                         warn!("Still playing, leave it be");
+                        return None;
                     }
+                    // If not, hang up
                     Err(_) => {
                         warn!("We're sitting idle, hang up");
                         {
@@ -305,11 +386,27 @@ impl SongBirdEventHandler for TrackEndCallback {
                         }
                         player_data.call_handle_lock = None;
                         warn!("Reset call handle");
+                        return None;
                     }
                 }
             }
+            // No track handle (nothing playing), if we're in a call, leave it
             None => {
-                warn!("No track handle");
+                warn!("No track handle, attempting to leave call");
+                match &player_data.call_handle_lock {
+                    Some(c) => {
+                        warn!("We've got a call, leaving it");
+                        {
+                            let mut call_lock = c.lock().await;
+                            call_lock.leave().await.expect("Error leaving call");
+                        }
+                        player_data.call_handle_lock = None;
+                        warn!("Reset call handle");
+                    }
+                    None => {
+                        warn!("Not in a call");
+                    }
+                }
             }
         }
         
