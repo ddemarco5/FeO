@@ -18,6 +18,12 @@ pub struct SnifferPost {
     pub timestamp: u64,
 }
 
+static APP_USER_AGENT: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    "/",
+    env!("CARGO_PKG_VERSION"),
+);
+
 // TODO: Make sense of the timestamps, so that if the post is deleted we can post how long it took for luls
 impl SnifferPost {
     pub fn from_roux(roux: roux::subreddit::responses::SubmissionsData) -> SnifferPost {
@@ -114,7 +120,8 @@ impl RedditScraper {
     pub fn new(sniffer: String) -> RedditScraper {
         debug!("Created the reddit scraper");
         let scraper = RedditScraper {
-            the_sniffer: User::new(sniffer.as_str()),
+            //the_sniffer: User::new(sniffer.as_str()),
+            the_sniffer: User::new_with_agent(sniffer.as_str(), APP_USER_AGENT),
             last_post_timestamp: 0,
             post_cache: Vec::new()
         };
