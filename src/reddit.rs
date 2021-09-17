@@ -7,6 +7,9 @@ use roux::util::RouxError;
 // For our url regex matching
 use regex::Regex;
 
+// for our api request
+use reqwest;
+
 
 #[derive(Debug, Clone)]
 pub struct SnifferPost {
@@ -99,6 +102,7 @@ impl SnifferPost {
 
 pub struct RedditScraper {
     the_sniffer: roux::User,
+    reqwest: reqwest::Client,
     last_post_timestamp: u64,
     post_cache: Vec<SnifferPost>,
 }
@@ -122,6 +126,7 @@ impl RedditScraper {
         let scraper = RedditScraper {
             //the_sniffer: User::new(sniffer.as_str()),
             the_sniffer: User::new_with_agent(sniffer.as_str(), APP_USER_AGENT),
+            reqwest: reqwest::Client::new(),
             last_post_timestamp: 0,
             post_cache: Vec::new()
         };
@@ -155,13 +160,21 @@ impl RedditScraper {
         return self;
     }
 
-    fn pull_posts(&self) -> Result<Vec<SnifferPost>, RouxError> {
+    //fn pull_posts(&self) -> Result<Vec<SnifferPost>, RouxError> {
+    fn pull_posts(&self) -> Result<Vec<SnifferPost>, reqwest::Error> {
         // Get from reddit api
 
         // dumb shit to run async in a sync function
         let reddit_posts = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
-                self.the_sniffer.submitted().await
+                //self.the_sniffer.submitted().await
+                let request = self.reqwest
+                    .get("https://www.reddit.com/user/Hentoota-Kitty/submitted.json")
+                    .header(reqwest::header::USER_AGENT, "test");
+                let result = request.send().await.expect("Failed to get our request");
+                warn!("Response status: {:?}", result.status());
+                warn!("Reponse headers:\n{:?}", result.headers());
+                result.json::<roux::subreddit::responses::Submissions>().await
             })
         });
         match reddit_posts {
@@ -181,7 +194,8 @@ impl RedditScraper {
         };
     }
     
-    pub fn update(&mut self) -> Result<Option<Vec<SnifferPost>>, RouxError> {
+    //pub fn update(&mut self) -> Result<Option<Vec<SnifferPost>>, RouxError> {
+    pub fn update(&mut self) -> Result<Option<Vec<SnifferPost>>, reqwest::Error> {
 
         debug!("Updating reddit posts");
 
