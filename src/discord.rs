@@ -12,15 +12,11 @@ use tokio_util::sync::CancellationToken;
 use serenity::{
     model::{id::ChannelId},
     client::{Client, bridge::gateway::ShardManager},
-    async_trait,
-    prelude::*,
-    model::{event::ResumedEvent, gateway::{Ready, Activity}},
-    model::channel::{Message, ChannelType, GuildChannel},
 };
 
 // Enable songbird register trait for serenity
 use songbird::SerenityInit;
-use songbird::Songbird;
+
 
 
 pub struct DiscordBot {

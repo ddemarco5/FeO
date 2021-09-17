@@ -1,5 +1,5 @@
 use std::sync::{Arc};
-use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
+use tokio::sync::{Mutex, RwLock};
 
 use songbird::{
     {Songbird, Call},
@@ -15,7 +15,7 @@ use songbird::{
 use serenity::{
     prelude::*,
     async_trait,
-    model::{id::{ChannelId, UserId}},
+    model::{id::{ChannelId}},
     model::{event::ResumedEvent, gateway::{Ready, Activity}},
     model::channel::{Message, ChannelType, GuildChannel},
 };
@@ -49,7 +49,6 @@ impl TypeMapKey for MusicHandler {
 pub struct AudioPlayer {
     pub songbird: Arc<Songbird>,
     player_data: Arc<RwLock<PlayerData>>,
-    user_id: Option<UserId>,
 }
 
 impl AudioPlayer {
@@ -62,7 +61,7 @@ impl AudioPlayer {
                 track_handle: None,
                 songbird: songbird.clone(),
             })),     
-            user_id: None,
+            //user_id: None,
         }
     }
 
@@ -353,7 +352,7 @@ struct TrackEndCallback {
 
 #[async_trait]
 impl SongBirdEventHandler for TrackEndCallback {
-    async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+    async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
         /*
         {
             let player_data = self.player_data.read().await;

@@ -65,7 +65,7 @@ async fn main() {
         warn!("Starting scraper thread");
         loop {
             // Check every X seconds
-            sleep(Duration::from_secs(45)).await;
+            sleep(Duration::from_secs(120)).await;
             match reddit.update() {
                 Ok(message_opt) => {
                     match message_opt {
