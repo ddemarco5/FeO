@@ -374,7 +374,6 @@ impl SongBirdEventHandler for TrackEndCallback {
                 match h.get_info().await {
                     Ok(_) => {
                         warn!("Still playing, leave it be");
-                        return None;
                     }
                     // If not, hang up
                     Err(_) => {
@@ -386,7 +385,6 @@ impl SongBirdEventHandler for TrackEndCallback {
                         }
                         player_data.call_handle_lock = None;
                         warn!("Reset call handle");
-                        return None;
                     }
                 }
             }
@@ -409,7 +407,6 @@ impl SongBirdEventHandler for TrackEndCallback {
                 }
             }
         }
-        
-        None
+        return None;
     }
 }
