@@ -269,12 +269,19 @@ impl EventHandler for AudioPlayer {
                                 let mut call_handler = h.lock().await;
                                 call_handler.leave().await.expect("Error leaving call");
                             }
-                            // Wipe everything
-                            //{
-                            //    let mut player_data = self.player_data.write().await;
-                            //    player_data.call_handle_lock = None;
-                            //    player_data.track_handle = None;
-                            //}
+                            // if we have a track running, stop it
+                            // TODO: Not perfect, because the callback will run
+                            // meaning if we come back and play something very short,
+                            // the timeout will trigger early (and twice)
+                            match self.get_track_handle() {
+                                Some(h) => {
+                                    warn!("We were playing a track, stop it");
+                                    h.stop().expect("Error stopping track");
+                                }
+                                None => {
+                                    warn!("Not playing a track");
+                                }
+                            }
                             self.clear_track_handle();
                             self.clear_call_handle();
                         }
@@ -354,16 +361,19 @@ impl SongBirdEventHandler for TrackEndCallback {
             error!("Waiting a few seconds to get it again");
         }
         */
-        warn!("Timeout callback fired");
+        warn!("Track end callback fired (timeout routine)");
         std::thread::sleep(std::time::Duration::from_secs(30));
+
+        // Check if we're in a call and abort before we get locks or anything
+        if self.player_data.as_ref().read().await.call_handle_lock.is_none() {
+            // We're not in a call anymore, get out of this routine
+            warn!("not in a call, aborting");
+            return None;
+        }
 
         // Make sure we're still in a call
         let mut player_data = self.player_data.try_write().expect("Failed to get the write in callback!");
         error!("Got lock");
-        if player_data.call_handle_lock.is_none() {
-            // We're not in a call anymore, get out of this routine
-            return None;
-        }
 
         // Check to see if we're playing anything
         match &player_data.track_handle {
@@ -402,7 +412,7 @@ impl SongBirdEventHandler for TrackEndCallback {
                         warn!("Reset call handle");
                     }
                     None => {
-                        warn!("Not in a call");
+                        error!("Not in a call (but this should never hit)");
                     }
                 }
             }

@@ -124,20 +124,26 @@ impl RedditScraper {
 
     fn init(mut self) -> RedditScraper {
         // Get from reddit api
-        let mut reddit_posts = self.pull_posts().expect("Error getting initial posts");
+        match self.pull_posts() {
+            Ok(mut p) => {
+                warn!("Got posts");
+                // Format the hyperlink text of all our pulled posts for consistency
+                for post in p.iter_mut() {
+                    post.format_urls();
+                }
 
-        // Format the hyperlink text of all our pulled posts for consistency
-        for post in reddit_posts.iter_mut() {
-            post.format_urls();
+                // Add our pulled posts to our cache
+                self.post_cache.append(&mut p);
+
+                // update our most recent timestamp
+                self.last_post_timestamp = self.post_cache.last().unwrap().timestamp;
+
+                warn!("Pulled {} intial posts", self.post_cache.len());
+            }
+            Err(e) => {
+                error!("Got error (probably ratelimit) - {:?}", e);
+            } 
         }
-
-        // Add our pulled posts to our cache
-        self.post_cache.append(&mut reddit_posts);
-
-        // update our most recent timestamp
-        self.last_post_timestamp = self.post_cache.last().unwrap().timestamp;
-
-        warn!("Pulled {} intial posts", self.post_cache.len());
 
         return self;
     }
