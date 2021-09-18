@@ -1,7 +1,7 @@
 // For sniffer post struct
 use crate::reddit::SnifferPost;
 use crate::Secrets;
-use crate::player::{AudioPlayer, MusicHandler, PlayerData};
+use crate::player::AudioPlayer;
 
 use std::sync::Arc;
 use tokio::select;
@@ -29,7 +29,7 @@ pub struct DiscordBot {
     test_channel: ChannelId,
     archive_channel: ChannelId,
     //songbird_instance: Option<Arc<Songbird>>,
-    //audio_player: Option<AudioPlayer>,
+    audio_player: Option<AudioPlayer>,
 }
 
 impl DiscordBot {
@@ -42,16 +42,17 @@ impl DiscordBot {
         // Create a songbird instance
         let audioplayer = AudioPlayer::new();
         warn!("Created audio player instance");
-        let songbird_handle = audioplayer.songbird();
+        let songbird_handle = audioplayer.get_songbird();
 
         // Create a new instance of the Client, logging in as a bot. This will
         // automatically prepend your bot token with "Bot ", which is a requirement
         // by Discord for bot users.
         let serenity_bot = Client::builder(&token)
-            .event_handler(audioplayer)
+            .event_handler(audioplayer.get_handler()) // Clone the audio player to keep ownership
             .register_songbird_with(songbird_handle.clone())
             .await
             .expect("Error creating client");
+        /*
         {
             let mut data = serenity_bot.data.write().await;
             //data.insert::<MusicHandler>(handler_lock.clone())
@@ -59,6 +60,7 @@ impl DiscordBot {
                 PlayerData::new(songbird_handle.clone())
             )
         }
+        */
         // Pull our bot user id and initialize songbird with it
         let bot_user_id = serenity_bot.cache_and_http.http.get_current_user().await.expect("couldn't get current user").id;
         songbird_handle.initialise_client_data(1, bot_user_id);
@@ -76,7 +78,7 @@ impl DiscordBot {
                 test_channel: ChannelId(secrets.test_channel),
                 archive_channel: ChannelId(secrets.archive_channel), // the archive channel
                 //songbird_instance: Some(songbird_handle.clone()),
-                //audio_player: Some(audioplayer),
+                audio_player: Some(audioplayer.clone()),
                 //call_handle_lock: Some(handler_lock),
             };
 
@@ -114,41 +116,25 @@ impl DiscordBot {
         }
     }
 
-    pub async fn shutdown(&mut self) {
-        //self.stop_audio().await;
+    pub async fn shutdown(mut self) {
+        self.stop_audio().await;
         self.stop_shards().await; // we hold a write lock on serenity here, it's its run future
         //self.stop_audio().await;
     }
 
-    /*
-    async fn stop_audio(&self) {  
+    //TODO: Find a way to make sure we can get the same instance of our original audio player
+    async fn stop_audio(&self) {
+        // If we have a player, hang up
+        if let Some(mut player) = self.audio_player.clone() {
+            player.hangup();
+            // This is dumb as hell, but if we don't wait a little bit we'll remove the shards
+            // before it has a chance to leave, they should really have a leave_blocking function
+            // There's nothing we can poll to check to see if we've fully left either, the
+            // associated structs reflect the state immediately
 
-        //match self.call_handle_lock.as_ref() {
-        //let data =  self.songbird_instance.as_ref().unwrap().data.read().await;
-        //let mut player_data = data.get::<MusicHandler>().expect("Error getting call handler");
-        let serenity_lock = self.serenity_bot.read().await;
-        let mut data = serenity_lock.data.write().await;
-        let player_data = data.get_mut::<MusicHandler>().expect("Error getting call handler");
-        match &player_data.call_handle_lock {
-            Some(h) => {
-                error!("Leaving call");
-                {
-                    let mut handler = h.lock().await;
-                    handler.leave().await.expect("Error leaving call");
-                }
-                // This is dumb as hell, but if we don't wait a little bit we'll remove the shards
-                // before it has a chance to leave, they should really have a leave_blocking function
-                // There's nothing we can poll to check to see if we've fully left either, the
-                // associated structs reflect the state immediately
-
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-            None => {
-                error!("No call handle, nothing to hang up on");
-            }
+            std::thread::sleep(std::time::Duration::from_millis(1000));
         }
     }
-    */
 
     async fn stop_shards(&mut self) {
         // Start the cancel
@@ -187,56 +173,6 @@ impl DiscordBot {
         self.archive_channel.say(&http, message_text).await.expect("Error sending message to archive");
     }
 
-    /*
-    pub async fn songbird_test(&mut self) {
-        error!("{:?}", self.songbird_instance);
-        // Try to join a server by id
-        let guild_id = songbird::id::GuildId::from(713563112728690689);
-        let channel_id = songbird::id::ChannelId::from(745482345099952129);
-        let user_id = songbird::id::UserId::from(842586247720861737);
-
-        self.songbird_instance.as_ref().unwrap().initialise_client_data(1, user_id);
-        error!("SONGBIRD: {:?}", self.songbird_instance.as_ref().unwrap());
-        // try to join the call
-        let (handler_lock, conn_result) = self.songbird_instance.as_ref().unwrap().join(guild_id, channel_id).await;
-
-        // Put the lock in our main struct
-        self.call_handle_lock = Some(handler_lock.clone());
-        error!("TEST: {:?}", self.call_handle_lock);
-        
-        match conn_result {
-            Ok(_) => {
-                error!("We connected to the voice channel!");
-
-                let youtube_input = ytdl("https://www.youtube.com/watch?v=zFzCHsIXDhE").await.expect("Error creating ytdl input");
-                error!("YOUTUBE: {:?}", youtube_input);
-                let (mut audio, audio_handle) = create_player(youtube_input);
-                // Closure for lock
-                {
-                    let mut handler = handler_lock.lock().await;
-                    audio.set_volume(0.2);
-                    handler.play_only(audio);
-                }
-                
-                //std::thread::sleep_ms(10000);
-                //audio_handle.stop().expect("Error stopping audio");
-                //std::thread::sleep_ms(5000);
-
-                // Another closure for lock
-                //{
-                //    let mut handler = handler_lock.lock().await;
-                //    handler.leave().await.expect("Error leaving call");
-                //}
-
-            }
-            Err(_) => {
-                error!("Error connecting to the voice channel!");
-            }
-        }
-        
-    }
-    */
-
     #[allow(dead_code)]
     pub async fn post_debug_string(&self, message: String) {
         let http = &self.bot_http;
@@ -264,6 +200,7 @@ impl Clone for DiscordBot {
             archive_channel: self.archive_channel.clone(),
             //songbird_instance: self.songbird_instance.clone(),
             //call_handle_lock: self.call_handle_lock.clone(),
+            audio_player: self.audio_player.clone(),
         }
     }
 }

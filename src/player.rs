@@ -4,12 +4,13 @@ use tokio::sync::{Mutex, RwLock};
 use songbird::{
     {Songbird, Call},
     {ytdl, tracks::create_player},
-    tracks::{TrackHandle},
+    tracks::{Track, TrackHandle, PlayMode},
     driver::Bitrate,
     Event,
     EventContext,
     EventHandler as SongBirdEventHandler,
     TrackEvent,
+    input::error::Error,
 };
 
 use serenity::{
@@ -17,12 +18,14 @@ use serenity::{
     async_trait,
     model::{id::{ChannelId}},
     model::{event::ResumedEvent, gateway::{Ready, Activity}},
+    model::prelude::User,
     model::channel::{Message, ChannelType, GuildChannel},
 };
 
 // For our url regex matching
 use regex::Regex;
 
+/*
 #[derive(Debug, Clone)]
 pub struct PlayerData {
     call_handle_lock: Option<Arc<Mutex<Call>>>,
@@ -39,70 +42,96 @@ impl PlayerData {
         }
     }
 }
-
+*/
+/*
 pub struct MusicHandler;
 
 impl TypeMapKey for MusicHandler {
     type Value = PlayerData;
 }
-
+*/
+#[derive(Clone)]
 pub struct AudioPlayer {
-    pub songbird: Arc<Songbird>,
-    player_data: Arc<RwLock<PlayerData>>,
+    //pub songbird: Arc<Songbird>,
+    //player_data: Arc<RwLock<PlayerData>>,
+    call_handle_lock: Option<Arc<Mutex<Call>>>,
+    track_handle: Option<TrackHandle>,
+    songbird: Arc<Songbird>,
 }
+
 
 impl AudioPlayer {
     pub fn new() -> AudioPlayer {
-        let songbird = Songbird::serenity();
         AudioPlayer {
-            songbird: songbird.clone(),
+        call_handle_lock: None,
+        track_handle: None,
+        songbird: Songbird::serenity(),
+        }
+        
+            /*
             player_data: Arc::new(RwLock::new(PlayerData {
                 call_handle_lock: None,
                 track_handle: None,
                 songbird: songbird.clone(),
-            })),     
+            })),
+            */
             //user_id: None,
+    }
+
+    /// Returns the event handler to give to serenity
+    pub fn get_handler(&self) -> AudioPlayerHandler {
+        AudioPlayerHandler{
+            audio_player: Arc::new(Mutex::new(self.clone())),
         }
     }
 
-    pub fn set_call_handle(&self, new_handle: Arc<Mutex<Call>>) {
+    pub fn set_call_handle(&mut self, new_handle: Arc<Mutex<Call>>) {
+        /*
         let mut data = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
-            self.player_data.write().await
+            self.call_handle_lock.write().await
             })
         });
         data.call_handle_lock = Some(new_handle);
-
+        */
+        self.call_handle_lock = Some(new_handle);
     }
 
-    pub fn clear_call_handle(&self) {
+    pub fn clear_call_handle(&mut self) {
+        /*
         let mut data = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
             self.player_data.write().await
             })
         });
-        data.call_handle_lock = None;
+        */
+        self.call_handle_lock = None;
     }
 
-    pub fn set_track_handle(&self, new_handle: TrackHandle) {
+    pub fn set_track_handle(&mut self, new_handle: TrackHandle) {
+        /*
         let mut data = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
             self.player_data.write().await
             })
         });
-        data.track_handle = Some(new_handle);
+        */
+        self.track_handle = Some(new_handle);
     }
 
-    pub fn clear_track_handle(&self) {
+    pub fn clear_track_handle(&mut self) {
+        /*
         let mut data = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
             self.player_data.write().await
             })
         });
-        data.track_handle = None;
+        */
+        self.track_handle = None;
     }
 
     pub fn get_call_handle(&self) -> Option<Arc<Mutex<Call>>> {
+        /*
         let data = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
             self.player_data.read().await
@@ -116,9 +145,12 @@ impl AudioPlayer {
                 return None;
             }
         }
+        */
+        return self.call_handle_lock.clone();
     }
 
     pub fn get_track_handle(&self) -> Option<TrackHandle> {
+        /*
         let data = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
             self.player_data.read().await
@@ -132,9 +164,11 @@ impl AudioPlayer {
                 return None;
             }
         }
+        */
+        return self.track_handle.clone();
     }
 
-    pub fn songbird(&self) -> Arc<Songbird> {
+    pub fn get_songbird(&self) -> Arc<Songbird> {
         return self.songbird.clone()
     }
 
@@ -144,7 +178,185 @@ impl AudioPlayer {
         ctx.set_activity(Activity::watching("the sniffer")).await;
     }
 
-    async fn process_play(&self, ctx: Context, new_message: Message) {
+    pub fn pause(&self) {
+        match &self.track_handle {
+            Some(t) => {
+                let info = tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        t.get_info().await
+                    })
+                });
+                match info {
+                    Ok(info) => {
+                        match info.playing {
+                            PlayMode::Play => {
+                                warn!("Pausing track");
+                                t.pause().expect("Error pausing track");
+                            }
+                            _ => {
+                                warn!("No track playing");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Couldn't get track info: {}", e);
+                    }
+                }
+            }
+            None => {
+                warn!("No Track");
+            }
+        }  
+    }
+
+    pub fn resume(&self) {
+        match &self.track_handle {
+            Some(t) => {
+                let info = tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        t.get_info().await
+                    })
+                });
+                match info {
+                    Ok(info) => {
+                        match info.playing {
+                            PlayMode::Pause => {
+                                warn!("Resuming track");
+                                t.play().expect("Error playing track");
+                            }
+                            _ => {
+                                warn!("No track paused");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Couldn't get track info: {}", e);
+                    }
+                }
+            }
+            None => {
+                warn!("No Track");
+            }
+        }  
+    }
+
+    pub fn stop(&mut self) {
+        match self.get_track_handle() {
+            Some(h) => {
+                h.stop().expect("Error stopping track");
+                self.clear_track_handle();
+            }
+            None => {
+                warn!("Told to stop, but not playing anything")
+            }
+        }
+        warn!("Stopped track");
+    }
+
+    pub fn hangup(&mut self) {
+        match self.get_call_handle() {
+            Some(h) => {
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let mut call_handler = h.lock().await;
+                        call_handler.leave().await.expect("Error leaving call");
+                    })
+                });
+                self.stop();
+                self.clear_track_handle();
+                self.clear_call_handle();
+            }
+            None => {
+                error!("Told do leave but we weren't here");
+            }
+        }
+    }
+
+    fn set_bitrate(&self, bitrate: Bitrate) {
+
+    }
+
+    async fn join_summoner(&mut self, new_message: &Message, ctx: &Context) -> Result<(), ()> {
+
+        let summoner = new_message.author.clone();
+        warn!("{} ({}) is summoning", summoner.name, summoner.id);
+        let current_guild_id = new_message.guild_id.expect("No guild id in this message");
+        let mut voice_channels = current_guild_id.channels(&ctx.http).await.unwrap().values().cloned().collect::<Vec<GuildChannel>>();
+        // remove all non-voice channels
+        voice_channels.retain(|x| x.kind == ChannelType::Voice);
+        // Look for our members
+        for channel in voice_channels {
+            for member in channel.members(ctx.cache.clone()).await.unwrap() {
+                match member.user {
+                    // We found them!
+                    summoner => {
+                        warn!("found our summoner \"{}\" in channel \"{}\"", summoner.name, channel.name);
+                        warn!("bitrate is {}", channel.bitrate.unwrap());
+                        let bitrate = Bitrate::BitsPerSecond(channel.bitrate.unwrap() as i32);
+                        // Join the call
+                        let (handler_lock, conn_result) = self.songbird.join(current_guild_id, channel.id).await;
+                        conn_result.expect("Error creating songbird call");
+
+                        // Set our call's bitrate
+                        {
+                            let mut call = handler_lock.lock().await;
+                            call.set_bitrate(bitrate);
+                        }
+                        self.set_call_handle(handler_lock);
+                        return Ok(());
+                    }
+                    // Couldn't find them :(
+                    _ => {
+                        warn!("we couldn't find our guy");
+                        return Err(());
+                    }
+                    
+                }
+            }
+        }
+        // If we get here for some reason, return nothing
+        return Err(());
+    }
+
+    async fn make_yt_track(&mut self, url: &str) -> Result<Track, Error> {
+        // Create our player
+        let youtube_input = ytdl(url).await?;
+        let metadata = youtube_input.metadata.clone();
+        warn!("Loaded up youtube: {} - {}", metadata.title.unwrap(), metadata.source_url.unwrap());
+        let (audio, track_handle) = create_player(youtube_input);
+        // Give it the handle to end the call if need be
+        track_handle.add_event(
+            Event::Track(TrackEvent::End),
+            TrackEndCallback {
+                //player_data: self.player_data.clone(),
+                audio_player: self.clone(),
+            }
+        ).expect("Failed to add handle to track");
+        // Record our track object
+        self.set_track_handle(track_handle);
+        return Ok(audio);
+        
+    }
+
+    fn play_only_track(&self, track: Track) {
+        // Start playing our audio
+        match &self.call_handle_lock {
+            Some(c) => {
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let mut call = c.lock().await;
+                        call.play_only(track);
+                    })
+                });
+            }
+            None => {
+                warn!("Can't play, not in a call");
+            }
+        }
+        
+    }
+
+    async fn process_play(&mut self, ctx: Context, new_message: Message) {
         lazy_static! {
             // Returns the whole string to replace in the first capture, contents of [] in 2nd and () in 3rd
             static ref RE: Regex = Regex::new(r"https://\S*youtu\S*").unwrap();
@@ -157,97 +369,55 @@ impl AudioPlayer {
                 error!("told to play, but nothing given");
             }
             Some(r) => {
-                warn!("Told to play");
-
-                //let mut player_data = self.player_data.write().await;
-
                 let url_to_play = &r[0];
-                // the bitrate we're going to use
-                let mut bitrate = Bitrate::Auto;
+                warn!("Told to play {}", url_to_play);
                 // Join our channel if we haven't yet
-                match self.get_call_handle() {
-                    Some(_) => {
-                        // already here
-                        warn!("We're already in the call, just start playing");
-                    }
-                    None => {
-                        // need to join
-                        warn!("Not in a call, need to join");
-                        // Find who summoned us
-                        let summoner = new_message.author;
-                        warn!("{} ({}) is summoning", summoner.name, summoner.id);
-
-                        let current_guild_id = new_message.guild_id.expect("No guild id in this message");
-                        let mut voice_channels = current_guild_id.channels(ctx.http).await.unwrap().values().cloned().collect::<Vec<GuildChannel>>();
-                        // remove all non-voice channels
-                        voice_channels.retain(|x| x.kind == ChannelType::Voice);
-
-                        let mut channel_id = ChannelId::from(0);
-                        // Look for our members
-                        for channel in voice_channels {
-                            for member in channel.members(ctx.cache.clone()).await.unwrap() {
-                                if member.user == summoner {
-                                    channel_id = channel.id;
-                                    warn!("found our summoner \"{}\" in channel \"{}\"", member.user.name, channel.name);
-                                    warn!("bitrate is {}", channel.bitrate.unwrap());
-                                    bitrate = Bitrate::BitsPerSecond(channel.bitrate.unwrap() as i32);
+                if self.get_call_handle().is_none() {
+                    // need to join
+                    warn!("Not in a call, need to join");
+                    // Join who summoned us
+                    match self.join_summoner(&new_message, &ctx).await {
+                        Ok(_) => {
+                            warn!("Joined summoner");
+                            let track = self.make_yt_track(url_to_play).await;
+                            match track {
+                                Ok(t) => {
+                                    warn!("Successfully created track, playing");
+                                    // play our track
+                                    self.play_only_track(t);
+                                }
+                                Err(e) => {
+                                    error!("Couldn't create youtube track: {}", e);
+                                    // Leave bc we can't play shit
+                                    self.hangup();
                                 }
                             }
                         }
-                        if *channel_id.as_u64() != (0 as u64) {
-                            let (handler_lock, conn_result) = self.songbird.join(current_guild_id, channel_id).await;
-                            conn_result.expect("Error creating songbird call");
-                            // Record our call handle
-                            //player_data.call_handle_lock = Some(handler_lock);
-                            self.set_call_handle(handler_lock);
-                        }
-                        else {
-                            error!("we couldn't find our guy");
-                            return;
-                        }   
+                        Err(_) => warn!("Couldn't find our summoner"),
                     }
                 }
-            
-                // Create our player
-                let youtube_input = ytdl(url_to_play).await.expect("Error creating ytdl input");
-                let metadata = youtube_input.metadata.clone();
-                warn!("Loaded up youtube: {} - {}", metadata.title.unwrap(), metadata.source_url.unwrap());
-                let (audio, track_handle) = create_player(youtube_input);
-                // Give it the handle to end the call if need be
-                track_handle.add_event(
-                    Event::Track(TrackEvent::End),
-                    TrackEndCallback {
-                        player_data: self.player_data.clone(),
-                    }
-                ).expect("Failed to add handle to track");
-                // Record our track object
-                //player_data.track_handle = Some(track_handle);
-                self.set_track_handle(track_handle);
-            
-                // Start playing our audio
-                let call_handle_lock = self.get_call_handle();
-                //let mut call_handle = self.player_data.read().await.call_handle_lock.as_ref().expect("Absolutely should have lock here").lock().await;
-                let mut call_handle = call_handle_lock.as_ref().expect("Absolutely should have lock here").lock().await;
-                call_handle.set_bitrate(bitrate);
-                call_handle.play_only(audio);
-
-                warn!("Playing a track!"); 
             }
         }
     }
 }
 
+pub struct AudioPlayerHandler {
+    audio_player: Arc<Mutex<AudioPlayer>>,
+}
+
 #[async_trait]
-impl EventHandler for AudioPlayer {
+impl EventHandler for AudioPlayerHandler {
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         warn!("Connected as {}, setting bot to online", ready.user.name);
-        self.set_status(&ctx).await;
+        let player = self.audio_player.lock().await;
+        player.set_status(&ctx).await;
     }
 
     async fn resume(&self, ctx: Context, _: ResumedEvent) {
         warn!("Resumed (reconnected)");
-        self.set_status(&ctx).await;
+        let player = self.audio_player.lock().await;
+        player.set_status(&ctx).await;
     }
 
     async fn message(&self, ctx: Context, new_message: Message) {
@@ -262,79 +432,29 @@ impl EventHandler for AudioPlayer {
             match new_message.content.as_str() {
                 "leave" => {
                     warn!("Told to leave");
-                    match self.get_call_handle() {
-                        Some(h) => {
-                            {
-                                let mut call_handler = h.lock().await;
-                                call_handler.leave().await.expect("Error leaving call");
-                            }
-                            // if we have a track running, stop it
-                            // TODO: Not perfect, because the callback will run
-                            // meaning if we come back and play something very short,
-                            // the timeout will trigger early (and twice)
-                            match self.get_track_handle() {
-                                Some(h) => {
-                                    warn!("We were playing a track, stop it");
-                                    h.stop().expect("Error stopping track");
-                                }
-                                None => {
-                                    warn!("Not playing a track");
-                                }
-                            }
-                            self.clear_track_handle();
-                            self.clear_call_handle();
-                        }
-                        None => {
-                            error!("Told do leave but we weren't here");
-                        }
-                    }
+                    let mut player = self.audio_player.lock().await;
+                    player.hangup();
                 }
                 "stop" => {
                     warn!("Told to stop");
-                    match self.get_track_handle() {
-                        Some(h) => {
-                            h.stop().expect("Error stopping track");
-                            // Wipe our track handle
-                            //{
-                            //    let mut player_data = self.player_data.write().await;
-                            //    player_data.track_handle = None;
-                            //}
-                            self.clear_track_handle();
-                        }
-                        None => {
-                            warn!("Told to stop, but not playing anything")
-                        }
-                    }
-                    warn!("Stopped track");
+                    let mut player = self.audio_player.lock().await;
+                    player.stop();
                 }
                 "pause" => {
                     warn!("Told to pause");
-                    match self.get_track_handle() {
-                        Some(h) => {
-                            h.pause().expect("Error pausing track");
-                        }
-                        None => {
-                            warn!("Told to pause, but not playing anything")
-                        }
-                    }
-                    warn!("Paused track");
+                    let player = self.audio_player.lock().await;
+                    player.pause();
                 }
                 "resume" => {
                     warn!("Told to resume");
-                    match self.get_track_handle() {
-                        Some(h) => {
-                            h.play().expect("Error resuming track");
-                        }
-                        None => {
-                            warn!("Told to resume, but not playing anything")
-                        }
-                    }
-                    warn!("Resumed track");
+                    let player = self.audio_player.lock().await;
+                    player.resume();
                 }
                 // Do our play matching below because "match" doesn't play well with contains
                 _ => {
                     if new_message.content.contains("play") {
-                        self.process_play(ctx, new_message).await;
+                        let mut player = self.audio_player.lock().await;
+                        player.process_play(ctx, new_message).await;
                     }
                     else {
                         error!("We got a message here, but it isn't any we are interested in");
@@ -347,7 +467,8 @@ impl EventHandler for AudioPlayer {
 
 // Very specific struct only for the purpose of leaving the call if nothing is playing after an idle timeout
 struct TrackEndCallback {
-    player_data: Arc<RwLock<PlayerData>>,
+    //player_data: Arc<RwLock<PlayerData>>,
+    audio_player: AudioPlayer,
 }
 
 #[async_trait]
@@ -363,6 +484,9 @@ impl SongBirdEventHandler for TrackEndCallback {
         warn!("Track end callback fired (timeout routine)");
         std::thread::sleep(std::time::Duration::from_secs(30));
 
+        //match self.audio_player.call_handle_lock
+
+        /*
         // Check if we're in a call and abort before we get locks or anything
         if self.player_data.as_ref().read().await.call_handle_lock.is_none() {
             // We're not in a call anymore, get out of this routine
@@ -416,6 +540,7 @@ impl SongBirdEventHandler for TrackEndCallback {
                 }
             }
         }
+        */
         return None;
     }
 }
