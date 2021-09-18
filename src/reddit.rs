@@ -1,14 +1,12 @@
 // Formatting
 use std::fmt;
-// For reddit functions
-use roux::User;
-use roux::util::RouxError;
 
 // For our url regex matching
 use regex::Regex;
 
 // for our api request
 use reqwest;
+use reqwest::{Client, Error};
 
 
 #[derive(Debug, Clone)]
@@ -23,7 +21,7 @@ pub struct SnifferPost {
 
 static APP_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
-    "/",
+    ":",
     env!("CARGO_PKG_VERSION"),
 );
 
@@ -101,7 +99,7 @@ impl SnifferPost {
 
 
 pub struct RedditScraper {
-    the_sniffer: roux::User,
+    the_sniffer: String,
     reqwest: reqwest::Client,
     last_post_timestamp: u64,
     post_cache: Vec<SnifferPost>,
@@ -122,11 +120,17 @@ impl fmt::Display for SnifferPost {
 impl RedditScraper {
 
     pub fn new(sniffer: String) -> RedditScraper {
-        debug!("Created the reddit scraper");
+        warn!("Created the reddit scraper with user agent: {}", APP_USER_AGENT);
         let scraper = RedditScraper {
-            //the_sniffer: User::new(sniffer.as_str()),
-            the_sniffer: User::new_with_agent(sniffer.as_str(), APP_USER_AGENT),
-            reqwest: reqwest::Client::new(),
+            the_sniffer: sniffer,
+            reqwest: Client::builder()
+                .user_agent(APP_USER_AGENT)
+                .connection_verbose(true)
+                //.use_native_tls()
+                .http1_title_case_headers()
+                //.http2_prior_knowledge()
+                .http2_adaptive_window(true)
+                .build().expect("Error building reqwest client"),
             last_post_timestamp: 0,
             post_cache: Vec::new()
         };
@@ -161,7 +165,7 @@ impl RedditScraper {
     }
 
     //fn pull_posts(&self) -> Result<Vec<SnifferPost>, RouxError> {
-    fn pull_posts(&self) -> Result<Vec<SnifferPost>, reqwest::Error> {
+    fn pull_posts(&self) -> Result<Vec<SnifferPost>, Error> {
         // Get from reddit api
 
         // dumb shit to run async in a sync function
@@ -169,8 +173,7 @@ impl RedditScraper {
             tokio::runtime::Handle::current().block_on(async move {
                 //self.the_sniffer.submitted().await
                 let request = self.reqwest
-                    .get("https://www.reddit.com/user/Hentoota-Kitty/submitted.json")
-                    .header(reqwest::header::USER_AGENT, "test");
+                    .get(format!("https://www.reddit.com/user/{}/submitted.json", self.the_sniffer));
                 let result = request.send().await.expect("Failed to get our request");
                 warn!("Response status: {:?}", result.status());
                 warn!("Reponse headers:\n{:?}", result.headers());
@@ -195,7 +198,7 @@ impl RedditScraper {
     }
     
     //pub fn update(&mut self) -> Result<Option<Vec<SnifferPost>>, RouxError> {
-    pub fn update(&mut self) -> Result<Option<Vec<SnifferPost>>, reqwest::Error> {
+    pub fn update(&mut self) -> Result<Option<Vec<SnifferPost>>, Error> {
 
         debug!("Updating reddit posts");
 
