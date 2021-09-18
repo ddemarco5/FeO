@@ -23,6 +23,7 @@ static APP_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
     ":",
     env!("CARGO_PKG_VERSION"),
+    " (I have no account)"
 );
 
 // TODO: Make sense of the timestamps, so that if the post is deleted we can post how long it took for luls
@@ -120,15 +121,16 @@ impl fmt::Display for SnifferPost {
 impl RedditScraper {
 
     pub fn new(sniffer: String) -> RedditScraper {
-        warn!("Created the reddit scraper with user agent: {}", APP_USER_AGENT);
+        warn!("Creating the reddit scraper with user agent: {}", APP_USER_AGENT);
+
         let scraper = RedditScraper {
             the_sniffer: sniffer,
             reqwest: Client::builder()
                 .user_agent(APP_USER_AGENT)
-                .connection_verbose(true)
+                //.connection_verbose(true)
                 //.use_native_tls()
                 .http1_title_case_headers()
-                //.http2_prior_knowledge()
+                .http2_prior_knowledge()
                 .http2_adaptive_window(true)
                 .build().expect("Error building reqwest client"),
             last_post_timestamp: 0,
@@ -175,8 +177,8 @@ impl RedditScraper {
                 let request = self.reqwest
                     .get(format!("https://www.reddit.com/user/{}/submitted.json", self.the_sniffer));
                 let result = request.send().await.expect("Failed to get our request");
-                warn!("Response status: {:?}", result.status());
-                warn!("Reponse headers:\n{:?}", result.headers());
+                debug!("Response status: {:?}", result.status());
+                debug!("Reponse headers:\n{:?}", result.headers());
                 result.json::<roux::subreddit::responses::Submissions>().await
             })
         });
