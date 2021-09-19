@@ -1,7 +1,7 @@
 // For sniffer post struct
 use crate::reddit::SnifferPost;
 use crate::Secrets;
-use crate::player::AudioPlayer;
+use crate::player::{AudioPlayer};
 
 use std::sync::Arc;
 use tokio::select;
@@ -28,42 +28,33 @@ pub struct DiscordBot {
     chat_channel: ChannelId,
     test_channel: ChannelId,
     archive_channel: ChannelId,
-    //songbird_instance: Option<Arc<Songbird>>,
-    audio_player: Option<AudioPlayer>,
+    audio_player: Option<Arc<Mutex<AudioPlayer>>>,
 }
 
 impl DiscordBot {
-    //pub async fn new(token: String, chat_channel: u64, archive_channel: u64, test_channel: u64) -> DiscordBot {
     pub async fn new(secrets: Secrets) -> DiscordBot {
         info!("Created the discord bot");
         // Configure the client with your Discord bot token in the environment.
         let token = secrets.bot_token;
 
-        // Create a songbird instance
-        let audioplayer = AudioPlayer::new();
+        // Create an audio player in a mutex and its serenity callback listener
+        let (audio_player_lock, audio_player_handler) = AudioPlayer::new().await;
         warn!("Created audio player instance");
-        let songbird_handle = audioplayer.get_songbird();
 
         // Create a new instance of the Client, logging in as a bot. This will
         // automatically prepend your bot token with "Bot ", which is a requirement
         // by Discord for bot users.
+        let audioplayer = audio_player_lock.lock().await; // Lock the player so we can do some work
         let serenity_bot = Client::builder(&token)
-            .event_handler(audioplayer.get_handler()) // Clone the audio player to keep ownership
-            .register_songbird_with(songbird_handle.clone())
+            //.event_handler(audioplayer.get_handler()) // Clone the audio player to keep ownership
+            .event_handler(audio_player_handler)
+            .register_songbird_with(audioplayer.get_songbird())
             .await
             .expect("Error creating client");
-        /*
-        {
-            let mut data = serenity_bot.data.write().await;
-            //data.insert::<MusicHandler>(handler_lock.clone())
-            data.insert::<MusicHandler>(
-                PlayerData::new(songbird_handle.clone())
-            )
-        }
-        */
-        // Pull our bot user id and initialize songbird with it
-        let bot_user_id = serenity_bot.cache_and_http.http.get_current_user().await.expect("couldn't get current user").id;
-        songbird_handle.initialise_client_data(1, bot_user_id);
+        // Initialize songbird with it
+        audioplayer.init_player(serenity_bot.cache_and_http.clone(), 1);
+        drop(audioplayer); // drop the lock so we can pass it off to our bot struct
+
         // Get a shared ref of our http cache so we can use it to send messages in an async fashion
         let http = serenity_bot.cache_and_http.http.clone();
         // And for shard manager too
@@ -77,9 +68,7 @@ impl DiscordBot {
                 chat_channel: ChannelId(secrets.main_channel), // main channel
                 test_channel: ChannelId(secrets.test_channel),
                 archive_channel: ChannelId(secrets.archive_channel), // the archive channel
-                //songbird_instance: Some(songbird_handle.clone()),
-                audio_player: Some(audioplayer.clone()),
-                //call_handle_lock: Some(handler_lock),
+                audio_player: Some(audio_player_lock),
             };
 
         return bot;
@@ -116,27 +105,29 @@ impl DiscordBot {
         }
     }
 
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(self) {
         self.stop_audio().await;
         self.stop_shards().await; // we hold a write lock on serenity here, it's its run future
-        //self.stop_audio().await;
     }
 
     //TODO: Find a way to make sure we can get the same instance of our original audio player
     async fn stop_audio(&self) {
         // If we have a player, hang up
-        if let Some(mut player) = self.audio_player.clone() {
+        if let Some(player_lock) = &self.audio_player {
+            let mut player = player_lock.lock().await;
+            player.remove_idle_check();
             player.hangup();
+            //player.dirty_hangup();
             // This is dumb as hell, but if we don't wait a little bit we'll remove the shards
             // before it has a chance to leave, they should really have a leave_blocking function
             // There's nothing we can poll to check to see if we've fully left either, the
             // associated structs reflect the state immediately
 
-            std::thread::sleep(std::time::Duration::from_millis(1000));
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
     }
 
-    async fn stop_shards(&mut self) {
+    async fn stop_shards(&self) {
         // Start the cancel
         self.shard_cancel_token.cancel();
         // Wait on our handle
@@ -145,8 +136,6 @@ impl DiscordBot {
                 let handle_lock = x.lock();
                 handle_lock.await;
                 warn!("Successfully waited on future");
-                //handle_box.await.expect("failed waiting for the sharts to end");
-                //*handle_lock.await;
             }
             None => {
                 error!("We don't have a shard handle")
@@ -198,8 +187,6 @@ impl Clone for DiscordBot {
             chat_channel: self.chat_channel.clone(),
             test_channel: self.test_channel.clone(),
             archive_channel: self.archive_channel.clone(),
-            //songbird_instance: self.songbird_instance.clone(),
-            //call_handle_lock: self.call_handle_lock.clone(),
             audio_player: self.audio_player.clone(),
         }
     }

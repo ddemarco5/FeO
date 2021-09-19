@@ -91,7 +91,7 @@ async fn main() {
     });
 
     // Clone discord bot to use in a thread
-    let mut discord_bot_clone = discord_bot.clone();
+    let discord_bot_clone = discord_bot.clone();
     let future_wait = tokio::spawn(async move {
         select! {
             _ = wait_token(run_token) => {
