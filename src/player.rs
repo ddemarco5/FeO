@@ -362,7 +362,8 @@ impl AudioPlayer {
     async fn process_play(&mut self, ctx: Context, new_message: Message) {
         lazy_static! {
             // Returns the whole string to replace in the first capture, contents of [] in 2nd and () in 3rd
-            static ref RE: Regex = Regex::new(r"https://\S*youtu\S*").unwrap();
+            //static ref RE: Regex = Regex::new(r"https://\S*youtu\S*").unwrap();
+            static ref RE: Regex = Regex::new(r"https://\S*").unwrap();
         }
 
         match RE.captures(new_message.content.as_str()) {
