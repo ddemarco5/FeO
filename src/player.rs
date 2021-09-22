@@ -551,8 +551,7 @@ struct TrackEndCallback {
 #[async_trait]
 impl SongBirdEventHandler for TrackEndCallback {
     async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
-        warn!("--------- PID: {} ---------", std::process::id());
-        warn!("Track end callback fired (timeout routine): {:?}", _ctx);
+        warn!("Runnig track end handler");
 
         let mut player = self.audio_player.lock().await;
         match &player.idle_callback_action {
