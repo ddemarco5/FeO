@@ -18,7 +18,7 @@ use serenity::{
     CacheAndHttp,
     prelude::*,
     async_trait,
-    model::{id::{ChannelId, GuildId}},
+    model::{id::{ChannelId}},
     model::{event::ResumedEvent, gateway::{Ready, Activity}},
     model::channel::{Message, ChannelType, GuildChannel},
 };
@@ -257,6 +257,7 @@ impl AudioPlayer {
 
         let summoner = new_message.author.clone();
         warn!("{} ({}) is summoning", summoner.name, summoner.id);
+        // TODO: Can probably use songbird to iterate the voice channels
         let current_guild_id = new_message.guild_id.expect("No guild id in this message");
         let mut voice_channels = current_guild_id.channels(&ctx.http).await.unwrap().values().cloned().collect::<Vec<GuildChannel>>();
         // remove all non-voice channels
@@ -266,7 +267,7 @@ impl AudioPlayer {
             for member in channel.members(ctx.cache.clone()).await.unwrap() {
                 if member.user == summoner {
                     warn!("found our summoner \"{}\" in channel \"{}\"", summoner.name, channel.name);
-                    match self.join_channel(&channel, current_guild_id).await {
+                    match self.join_channel(&channel).await {
                         Ok(_) => return Ok(()),
                         Err(e) => {
                             error!("Error joining channel {}", e);
@@ -283,6 +284,7 @@ impl AudioPlayer {
 
     async fn join_most_crowded(&mut self, new_message: &Message, ctx: &Context) -> Result<(), ()> {
 
+        // TODO: Can probably use songbird to iterate the voice channels
         let current_guild_id = new_message.guild_id.expect("No guild id in this message");
         let mut voice_channels = current_guild_id.channels(&ctx.http).await.unwrap().values().cloned().collect::<Vec<GuildChannel>>();
         // remove all non-voice channels
@@ -308,7 +310,7 @@ impl AudioPlayer {
             match voice_channels.first() {
                 Some(c) => {
                     warn!("Joining most crowded channel {}", c.name);
-                    match self.join_channel(c, current_guild_id).await {
+                    match self.join_channel(c).await {
                         Ok(_) => return Ok(()),
                         Err(e) => {
                             error!("Error joining channel {}", e);
@@ -330,33 +332,33 @@ impl AudioPlayer {
     
     }
 
-    async fn join_channel(&mut self, channel: &GuildChannel, guild_id: GuildId) -> JoinResult<()> {
+    async fn join_channel(&mut self, channel: &GuildChannel) -> JoinResult<()> {
 
-        // Kinda yucky, but this will unwrap the option, lock the call, check it's connection, all in one line
-        match self.call_handle_lock.as_ref().unwrap().lock().await.current_connection() {
+        let songbird_channel_id = songbird::id::ChannelId::from(channel.id);
+        let mut call = self.call_handle_lock.as_ref().unwrap().lock().await;
+        match call.current_connection() {
             Some(i) => {
                 // Songbird channel id vs serenity channel id. Unwrap them both down to their u64s
-                if i.channel_id.unwrap().0 == channel.id.0 {
-                    warn!("We're already in this call");
+                //if i.channel_id.unwrap().0 == channel.id.0 {
+                if i.channel_id.unwrap() == songbird_channel_id {
+                    warn!("We're already in this channel");
                 }
                 else {
-                    warn!("In a different call, joining a new one");
+                    warn!("In a different channel, joining a new one");
                 }
             }
             None => {
-                warn!("Not in a call");
+                warn!("Not in a channel");
             }
         }
         warn!("bitrate is {}", channel.bitrate.unwrap());
         let bitrate = Bitrate::BitsPerSecond(channel.bitrate.unwrap() as i32);
-        // Join the call
-        let (handler_lock, conn_result) = self.songbird.join(guild_id, channel.id).await;
-        conn_result?; // the ? will propegate
-        // Set our call's bitrate
-        {
-            let mut call = handler_lock.lock().await;
-            call.set_bitrate(bitrate);
-        }
+         // Set our call's bitrate
+        call.set_bitrate(bitrate);
+        // Join the channel
+        call.join(songbird_channel_id).await?; //the ? will propegate
+        //let (handler_lock, conn_result) = self.songbird.join(guild_id, channel.id).await;
+        //conn_result?; // 
         return Ok(());
     }
 
