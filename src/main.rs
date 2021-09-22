@@ -22,6 +22,7 @@ mod player;
 #[derive(Deserialize, Debug, Clone)]
 pub struct Secrets {
     bot_token: String,
+    guild_id: u64,
     main_channel: u64,
     test_channel: u64,
     archive_channel: u64,

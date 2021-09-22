@@ -44,7 +44,7 @@ impl DiscordBot {
         // Create a new instance of the Client, logging in as a bot. This will
         // automatically prepend your bot token with "Bot ", which is a requirement
         // by Discord for bot users.
-        let audioplayer = audio_player_lock.lock().await; // Lock the player so we can do some work
+        let mut audioplayer = audio_player_lock.lock().await; // Lock the player so we can do some work
         let serenity_bot = Client::builder(&token)
             //.event_handler(audioplayer.get_handler()) // Clone the audio player to keep ownership
             .event_handler(audio_player_handler)
@@ -52,7 +52,7 @@ impl DiscordBot {
             .await
             .expect("Error creating client");
         // Initialize songbird with it
-        audioplayer.init_player(serenity_bot.cache_and_http.clone(), 1);
+        audioplayer.init_player(serenity_bot.cache_and_http.clone(), 1, secrets.guild_id).await;
         drop(audioplayer); // drop the lock so we can pass it off to our bot struct
 
         // Get a shared ref of our http cache so we can use it to send messages in an async fashion
@@ -85,7 +85,7 @@ impl DiscordBot {
                         warn!("Shard threads stopped")
                     }
                     _ = cloned_token.cancelled() => {
-                        warn!{"Cancelled our shards"}
+                        warn!("Cancelled our shards")
                     }
                 }
             })
@@ -115,15 +115,16 @@ impl DiscordBot {
         // If we have a player, hang up
         if let Some(player_lock) = &self.audio_player {
             let mut player = player_lock.lock().await;
-            player.remove_idle_check();
-            player.hangup();
+            player.shutdown();
+            //player.remove_idle_check();
+            //player.hangup();
             //player.dirty_hangup();
             // This is dumb as hell, but if we don't wait a little bit we'll remove the shards
             // before it has a chance to leave, they should really have a leave_blocking function
             // There's nothing we can poll to check to see if we've fully left either, the
             // associated structs reflect the state immediately
 
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
 
