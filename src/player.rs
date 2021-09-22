@@ -344,7 +344,7 @@ impl AudioPlayer {
                 }
             }
             None => {
-                error!("can't get call info even though we have a handle for some reason");
+                warn!("Not in a call");
             }
         }
         warn!("bitrate is {}", channel.bitrate.unwrap());
