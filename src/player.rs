@@ -351,7 +351,6 @@ impl AudioPlayer {
         match call.current_connection() {
             Some(i) => {
                 // Songbird channel id vs serenity channel id. Unwrap them both down to their u64s
-                //if i.channel_id.unwrap().0 == channel.id.0 {
                 if i.channel_id.unwrap() == songbird_channel_id {
                     warn!("We're already in this channel");
                 }
@@ -369,8 +368,6 @@ impl AudioPlayer {
         call.set_bitrate(bitrate);
         // Join the channel
         call.join(songbird_channel_id).await?; //the ? will propegate
-        //let (handler_lock, conn_result) = self.songbird.join(guild_id, channel.id).await;
-        //conn_result?; // 
         return Ok(());
     }
 
@@ -635,7 +632,6 @@ impl SongBirdEventHandler for TrackEndCallback {
                             // so wait a second for discord to properly register this person as gone
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             let members = c.members(cache).await.expect("Error checking members in channel");
-                            warn!("members:\n{:?}", members);
                             if members.len() > 1 { // 1 because the sniffer will be in this channel
                                 warn!("Still members in the channel, staying");
                             }
