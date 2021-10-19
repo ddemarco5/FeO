@@ -10,6 +10,7 @@ use songbird::{
     EventContext,
     EventHandler as SongBirdEventHandler,
     TrackEvent,
+    CoreEvent,
     input::error::Error,
     error::JoinResult,
 };
@@ -18,9 +19,9 @@ use serenity::{
     CacheAndHttp,
     prelude::*,
     async_trait,
-    model::{id::{ChannelId}},
+    model::{id::{ChannelId, EmojiId}},
     model::{event::ResumedEvent, gateway::{Ready, Activity}},
-    model::channel::{Message, ChannelType, GuildChannel},
+    model::channel::{Message, ChannelType, Channel, GuildChannel, ReactionType},
 };
 
 // For our url regex matching
@@ -33,7 +34,7 @@ enum TrackEndAction {
     TIMEOUT,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AudioPlayer {
     call_handle_lock: Option<Arc<Mutex<Call>>>,
     track_handle: Option<TrackHandle>,
@@ -41,6 +42,7 @@ pub struct AudioPlayer {
     idle_callback_action: TrackEndAction,
     idle_callback_struct: Option<TrackEndCallback>,
     timeout_handle: Option<Arc<Mutex<tokio::task::JoinHandle<()>>>>,
+    cache_and_http: Option<std::sync::Arc<CacheAndHttp>>,
 }
 
 
@@ -54,6 +56,7 @@ impl AudioPlayer {
             idle_callback_action: TrackEndAction::NOTHING,
             idle_callback_struct: None,
             timeout_handle: None,
+            cache_and_http: None,
         }));
         // The player's event handler
         let handler = AudioPlayerHandler{
@@ -74,7 +77,10 @@ impl AudioPlayer {
 
     /// Give songbird the information it needs to join a call as a bots
     pub async fn init_player(&mut self, cache_and_http: std::sync::Arc<CacheAndHttp>, shard_count: u64, guild_id_u64: u64) {
-        let cache_http_clone = cache_and_http.clone();
+        // Save a reference of serenity's cache and http object for later use
+        self.cache_and_http = Some(cache_and_http.clone());
+        
+        let cache_http_clone = cache_and_http.clone();   
         let bot_user_id = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
                 cache_http_clone.http.get_current_user().await.expect("couldn't get current user").id
@@ -86,10 +92,16 @@ impl AudioPlayer {
         let call_lock = self.songbird.get_or_insert(guild_id);
         self.call_handle_lock = Some(call_lock.clone());
         let mut call = call_lock.lock().await;
+        // Add the callback to track end event
         call.add_global_event(
             Event::Track(TrackEvent::End),
             // Install a copy of our callback struct as an event, this only needs to ever be done once,
             // as the call actually persists, even if we call leave()
+            self.idle_callback_struct.as_ref().unwrap().clone(),
+        );
+        // Add the callback to client disconnect event
+        call.add_global_event(
+            Event::Core(CoreEvent::ClientDisconnect),
             self.idle_callback_struct.as_ref().unwrap().clone(),
         );
         warn!("Installed track end event and callback");
@@ -427,15 +439,17 @@ impl AudioPlayer {
                                 self.set_idle_check(TrackEndAction::LEAVE);
                                 // play our track
                                 self.play_only_track(t);
+                                react_driveby(&ctx, &new_message);
                             }
                             Err(_) => {
                                 warn!("Couldn't find a channel with anyone in it");
+                                react_fail(&ctx, &new_message);
                             }
                         }
-                        
                     }
                     Err(e) => {
                         error!("Couldn't create youtube track: {}", e);
+                        react_fail(&ctx, &new_message);
                     }
                 }
             }
@@ -466,15 +480,22 @@ impl AudioPlayer {
                                 self.set_idle_check(TrackEndAction::TIMEOUT);
                                 // play our track
                                 self.play_only_track(t);
+                                react_success(&ctx, &new_message);
+                                
                             }
                             Err(e) => {
                                 error!("Couldn't create youtube track: {}", e);
                                 // Leave bc we can't play shit
                                 self.hangup();
+                                react_fail(&ctx, &new_message);
                             }
                         }
                     }
-                    Err(_) => warn!("Couldn't find our summoner"),
+                    Err(_) => {
+                        warn!("Couldn't find our summoner");
+                        react_fail(&ctx, &new_message);
+                    }
+                    
                 }
             }
         }
@@ -544,50 +565,134 @@ impl EventHandler for AudioPlayerHandler {
 }
 
 // Very specific struct only for the purpose of leaving the call if nothing is playing after an idle timeout
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct TrackEndCallback {
     audio_player: Arc<Mutex<AudioPlayer>>,
     timeout: std::time::Duration,
 }
 
+
+// Multi-use callback, installed in track end events and whatever other cases I want to write in
 #[async_trait]
 impl SongBirdEventHandler for TrackEndCallback {
-    async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
-        warn!("Runnig track end handler");
-
-        let mut player = self.audio_player.lock().await;
-        match &player.idle_callback_action {
-            // Timeout the call after inactivity
-            TrackEndAction::TIMEOUT => {
-                // If we have an existing handle, abort it to start again
-                if let Some(timeout_handle) = player.timeout_handle.clone() {
-                    let handle = timeout_handle.lock().await;
-                    handle.abort();
-                    warn!("Aborted existing handle");
+    async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        warn!("Running track end handler");
+        match ctx {
+            EventContext::Track(_) => {
+                warn!("Got track event");
+                let mut player = self.audio_player.lock().await;
+                match &player.idle_callback_action {
+                    // Timeout the call after inactivity
+                    TrackEndAction::TIMEOUT => {
+                        // If we have an existing handle, abort it to start again
+                        if let Some(timeout_handle) = player.timeout_handle.clone() {
+                            let handle = timeout_handle.lock().await;
+                            handle.abort();
+                            warn!("Aborted existing handle");
+                        }
+                        // Spawn our thread to wait our timeout amount
+                        // clone our stuff for use in task
+                        let player_clone = self.audio_player.clone();
+                        let timeout = self.timeout.clone();
+                        player.timeout_handle = Some(Arc::new(Mutex::new(tokio::spawn(async move {
+                            tokio::time::sleep(timeout).await; // We use tokio's sleep because it's abortable
+                            warn!("Reached our timeout");
+                            let mut player = player_clone.lock().await;
+                            player.shutdown();
+                            warn!("shut down our player");
+                        }))));
+                        warn!("spawned tokio timeout task");
+                    }
+                    // Leave immediately
+                    TrackEndAction::LEAVE => {
+                        warn!("Leaving the call");
+                        player.shutdown();
+                    }
+                    // Don't do anything, let it end and sit there
+                    TrackEndAction::NOTHING => {
+                        warn!("Do nothing, idle check is disabled")
+                    }
                 }
-                // Spawn our thread to wait our timeout amount
-                // clone our stuff for use in task
-                let player_clone = self.audio_player.clone();
-                let timeout = self.timeout.clone();
-                player.timeout_handle = Some(Arc::new(Mutex::new(tokio::spawn(async move {
-                    tokio::time::sleep(timeout).await; // We use tokio's sleep because it's abortable
-                    warn!("Reached our timeout");
-                    let mut player = player_clone.lock().await;
-                    player.shutdown();
-                    warn!("shut down our player");
-                }))));
-                warn!("spawned tokio timeout task");
             }
-            // Leave immediately
-            TrackEndAction::LEAVE => {
-                warn!("Leaving the call");
-                player.shutdown();
+            // Leave if the channel is empty after a disconnect
+            EventContext::ClientDisconnect(_) => {
+                warn!("Client disconnect event");
+                // We do this in this scoped fashion so we drop the lock after we pull the channel id and cache
+                let (current_channel_id_u64, cache_and_http) = {
+                    let player = self.audio_player.lock().await;
+                    let call = player.call_handle_lock.as_ref().unwrap().lock().await;
+                    (call.current_channel().unwrap().0, player.cache_and_http.clone())
+                };
+                let serenity_channel_id = ChannelId::from(current_channel_id_u64);
+                // Get the channel members
+                if let Some(x) = cache_and_http {
+                    let cache = x.cache.clone();
+                    let channel = serenity_channel_id.to_channel_cached(cache.clone()).await.expect("couldn't find channel");
+                    // If it's a guild channel
+                    match channel {
+                        Channel::Guild(c) => {
+                            // Pretty stupid, but sometimes the members list reports the user that just left
+                            // so wait a second for discord to properly register this person as gone
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            let members = c.members(cache).await.expect("Error checking members in channel");
+                            warn!("members:\n{:?}", members);
+                            if members.len() > 1 { // 1 because the sniffer will be in this channel
+                                warn!("Still members in the channel, staying");
+                            }
+                            else {    
+                                warn!("No more members in the channel, stopping");
+                                let mut player = self.audio_player.lock().await;
+                                player.hangup();
+                            }
+                        }
+                        _ => {
+                            warn!("not a guild channel");
+                        }
+                    }
+
+                }
             }
-            // Don't do anything, let it end and sit there
-            TrackEndAction::NOTHING => {
-                warn!("Do nothing, idle check is disabled")
+            _ => {
+                warn!("Some event {:?}, we don't care about it", ctx);
             }
         }
+        
         return None;
     }
+}
+
+fn react_success(ctx: &Context, message: &Message) {
+    tokio::task::block_in_place(move || {
+        tokio::runtime::Handle::current().block_on(async move {
+            message.react(ctx.http.clone(), ReactionType::Custom{
+                animated: false,
+                id: EmojiId(801166698610294895),
+                name: Some(String::from(":guthchamp:")),
+            }).await.expect("Failed to react to post");
+        })
+    });
+}
+
+fn react_fail(ctx: &Context, message: &Message) {
+    tokio::task::block_in_place(move || {
+        tokio::runtime::Handle::current().block_on(async move {
+            message.react(ctx.http.clone(), ReactionType::Custom{
+                animated: false,
+                id: EmojiId(886356280934006844),
+                name: Some(String::from(":final_pepe:")),
+            }).await.expect("Failed to react to post");
+        })
+    });
+}
+
+fn react_driveby(ctx: &Context, message: &Message) {
+    tokio::task::block_in_place(move || {
+        tokio::runtime::Handle::current().block_on(async move {
+            message.react(ctx.http.clone(), ReactionType::Custom{
+                animated: false,
+                id: EmojiId(740361878424911933),
+                name: Some(String::from(":anilblast:")),
+            }).await.expect("Failed to react to post");
+        })
+    });
 }
