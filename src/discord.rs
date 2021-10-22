@@ -38,7 +38,7 @@ impl DiscordBot {
         let token = secrets.bot_token;
 
         // Create an audio player in a mutex and its serenity callback listener
-        let (audio_player_lock, audio_player_handler) = AudioPlayer::new().await;
+        let (audio_player_lock, audio_player_handler) = AudioPlayer::new(secrets.audio_channel, 10).await;
         warn!("Created audio player instance");
 
         // Create a new instance of the Client, logging in as a bot. This will

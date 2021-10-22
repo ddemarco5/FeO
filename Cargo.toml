@@ -20,8 +20,9 @@ serde_yaml = "*"
 regex = "*"
 lazy_static = "*"
 futures-locks = "*"
-songbird = { version = "0.2.0", features = ["serenity", "native"] }
+songbird = { version = "0.2.0", features = ["serenity", "native", "builtin-queue"] }
 #songbird = "0.2.0"
+uuid = "*"
 
 [dependencies.serenity]
 default-features = false

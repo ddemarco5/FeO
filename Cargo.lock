@@ -1651,6 +1651,7 @@ dependencies = [
  "songbird",
  "tokio 1.5.0",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]
