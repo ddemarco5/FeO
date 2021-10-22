@@ -270,12 +270,8 @@ impl AudioPlayer {
             tokio::runtime::Handle::current().block_on(async move {
                 let mut call = self.call_handle_lock.as_ref().unwrap().lock().await;
                 if let Some(_) = call.current_connection() {
-                    //call.leave().await.expect("Error leaving call");
-                    match call.leave().await {
-                        Err(_) => {
-                            return Err(String::from("Error leaving call"));
-                        }
-                        _ => {} // if we succeed, just proceed with program flow
+                    if let Err(_) = call.leave().await {
+                        return Err(String::from("Error leaving call"));
                     }
                 }
                 else {
@@ -295,12 +291,18 @@ impl AudioPlayer {
         Ok(())
     }
 
-    async fn join_summoner(&mut self, new_message: &Message, ctx: &Context) -> Result<(), ()> {
+    async fn join_summoner(&mut self, new_message: &Message, ctx: &Context) -> Result<(), String> {
 
         let summoner = new_message.author.clone();
         warn!("{} ({}) is summoning", summoner.name, summoner.id);
         // TODO: Can probably use songbird to iterate the voice channels
-        let current_guild_id = new_message.guild_id.expect("No guild id in this message");
+        let current_guild_id = match new_message.guild_id {
+            Some(id) => id,
+            None => {
+                return Err(String::from("No guild id in this message"));
+            }   
+        };
+
         let mut voice_channels = current_guild_id.channels(&ctx.http).await.unwrap().values().cloned().collect::<Vec<GuildChannel>>();
         // remove all non-voice channels
         voice_channels.retain(|x| x.kind == ChannelType::Voice);
@@ -312,22 +314,25 @@ impl AudioPlayer {
                     match self.join_channel(&channel).await {
                         Ok(_) => return Ok(()),
                         Err(e) => {
-                            error!("Error joining channel {}", e);
-                            return Err(());
+                            return Err(String::from(format!("Error joining channel {}", e)));
                         }
                     }
                 }
             }
         }
         // If we get here for some reason, return nothing
-        warn!("we couldn't find our guy");
-        return Err(());
+        return Err(String::from("we couldn't find our guy"));
     }
 
-    async fn join_most_crowded(&mut self, new_message: &Message, ctx: &Context) -> Result<(), ()> {
+    async fn join_most_crowded(&mut self, new_message: &Message, ctx: &Context) -> Result<(), String> {
 
         // TODO: Can probably use songbird to iterate the voice channels
-        let current_guild_id = new_message.guild_id.expect("No guild id in this message");
+        let current_guild_id = match new_message.guild_id {
+            Some(id) => id,
+            None => {
+                return Err(String::from("No guild id in this message"));
+            }   
+        };
         let mut voice_channels = current_guild_id.channels(&ctx.http).await.unwrap().values().cloned().collect::<Vec<GuildChannel>>();
         // remove all non-voice channels
         voice_channels.retain(|x| x.kind == ChannelType::Voice);
@@ -355,21 +360,18 @@ impl AudioPlayer {
                     match self.join_channel(c).await {
                         Ok(_) => return Ok(()),
                         Err(e) => {
-                            error!("Error joining channel {}", e);
-                            return Err(());
+                            return Err(String::from(format!("Error joining channel {}", e)));
                         }
                     }
                 }
                 None => {
-                    warn!("No voice channels");
-                    return Err(());
+                    return Err(String::from("No voice channels"));
                 }
                 
             } 
         }
         else {
-            warn!("Nobody in any of the voice channels");
-            return Err(());
+            return Err(String::from("Nobody in any of the voice channels"));
         }
     }
 
@@ -452,28 +454,20 @@ impl AudioPlayer {
                 let url_to_play = r.as_str();
                 warn!("driveby with {}", url_to_play);
                 // Load up our song
-                let track = self.make_ytdl_track(url_to_play).await;
-                match track {
-                    Ok(t) => {
-                        warn!("Successfully loaded track, pullin up");
-                        // Join channel with the most people
-                        match self.join_most_crowded(&new_message, &ctx).await {
-                            Ok(_) => {
-                                // Get out of there when we're done
-                                self.set_idle_check(TrackEndAction::LEAVE);
-                                // play our track
-                                self.play_only_track(t);
-                                //react_driveby(&ctx, &new_message);
-                            }
-                            Err(_) => {
-                                return Err(String::from("Couldn't find a channel with anyone in it"));
-                            }
-                        }
-                    }
+                let track = match self.make_ytdl_track(url_to_play).await {
+                    Ok(t) => t,
                     Err(e) => {
-                        return Err(String::from(format!("Couldn't create youtube track: {}", e)));
+                        return Err(String::from(format!("Error making yt track: {}", e)));
                     }
-                }
+                };
+                warn!("Successfully loaded track, pullin up");
+                // Join channel with the most people
+
+                self.join_most_crowded(&new_message, &ctx).await?;
+                // Get out of there when we're done
+                self.set_idle_check(TrackEndAction::LEAVE);
+                // play our track
+                self.play_only_track(track);
             }
         }
         Ok(())
@@ -488,30 +482,24 @@ impl AudioPlayer {
             Ok(r) => {
                 let url_to_play = r.as_str();
                 warn!("Told to play {}", url_to_play);
-                match self.join_summoner(&new_message, &ctx).await {
-                    Ok(_) => {
+                // Remove the timeout so we don't accidentally hang up while we process
+                self.cancel_timeout();
+                // Play the track
+                let track = self.make_ytdl_track(url_to_play).await;
+                match track {
+                    Ok(t) => {
+                        warn!("Successfully created track");
+                        self.join_summoner(&new_message, &ctx).await?;
                         warn!("Joined summoner");
-                        // Remove the timeout so we don't accidentally hang up while we process
-                        self.cancel_timeout();
-                        // Play the track
-                        let track = self.make_ytdl_track(url_to_play).await;
-                        match track {
-                            Ok(t) => {
-                                warn!("Successfully created track, playing");
-                                // Add the idle event listener to the driver
-                                self.set_idle_check(TrackEndAction::TIMEOUT);
-                                // play our track
-                                self.play_only_track(t);
-                            }
-                            Err(e) => {
-                                // Leave bc we can't play shit
-                                self.hangup()?;
-                                return Err(String::from(format!("Couldn't create youtube track: {}", e)));
-                            }
-                        }
+                        // Add the idle event listener to the driver
+                        self.set_idle_check(TrackEndAction::TIMEOUT);
+                        // play our track
+                        warn!("playing");
+                        self.play_only_track(t);
                     }
-                    Err(_) => {
-                        return Err(String::from("Couldn't find our summoner"));
+                    Err(e) => {
+                        // Leave bc we can't play shit
+                        return Err(String::from(format!("Couldn't create track: {}", e)));
                     }
                 }
                 Ok(())
@@ -563,9 +551,6 @@ impl AudioPlayerHandler {
                     player.process_driveby(&ctx, &new_message).await?;
                     return Ok(());
                 }
-                //else {
-                //    error!("We got a message here, but it isn't any we are interested in");
-                //}
             }
         }
         return Err(String::from("No valid command found in message"));
