@@ -115,10 +115,9 @@ impl DiscordBot {
         // If we have a player, hang up
         if let Some(player_lock) = &self.audio_player {
             let mut player = player_lock.lock().await;
-            player.shutdown();
-            //player.remove_idle_check();
-            //player.hangup();
-            //player.dirty_hangup();
+            if let Err(x) = player.shutdown() {
+                error!("Error shutting down player: {}", x);
+            }
             // This is dumb as hell, but if we don't wait a little bit we'll remove the shards
             // before it has a chance to leave, they should really have a leave_blocking function
             // There's nothing we can poll to check to see if we've fully left either, the

@@ -148,7 +148,7 @@ impl AudioPlayer {
         ctx.set_activity(Activity::watching("the sniffer")).await;
     }
 
-    pub fn pause(&self) {
+    pub fn pause(&self) -> Result<(), String> {
         match &self.track_handle {
             Some(t) => {
                 let info = tokio::task::block_in_place(move || {
@@ -160,26 +160,33 @@ impl AudioPlayer {
                     Ok(info) => {
                         match info.playing {
                             PlayMode::Play => {
-                                warn!("Pausing track");
-                                t.pause().expect("Error pausing track");
+                                match t.pause() {
+                                    Ok(_) => {
+                                        warn!("Paused track");
+                                    }
+                                    Err(_) => {
+                                        return Err(String::from("Error pausing track"));
+                                    }
+                                }
                             }
                             _ => {
-                                warn!("No track playing");
+                                return Err(String::from("No track playing"));
                             }
                         }
                     }
                     Err(e) => {
-                        error!("Couldn't get track info: {}", e);
+                        return Err(String::from(format!("Couldn't get track info: {}", e)));
                     }
                 }
             }
             None => {
-                warn!("No Track");
+                return Err(String::from("No Track"));
             }
-        }  
+        }
+        Ok(())
     }
 
-    pub fn resume(&self) {
+    pub fn resume(&self) -> Result<(), String> {
         match &self.track_handle {
             Some(t) => {
                 let info = tokio::task::block_in_place(move || {
@@ -191,26 +198,33 @@ impl AudioPlayer {
                     Ok(info) => {
                         match info.playing {
                             PlayMode::Pause => {
-                                warn!("Resuming track");
-                                t.play().expect("Error playing track");
+                                match t.play() {
+                                    Ok(_) => {
+                                        warn!("Resumed track");
+                                    }
+                                    Err(_) => {
+                                        return Err(String::from("Error playing track"));
+                                    }
+                                }
                             }
                             _ => {
-                                warn!("No track paused");
+                                return Err(String::from("No track paused"));
                             }
                         }
                     }
                     Err(e) => {
-                        error!("Couldn't get track info: {}", e);
+                        return Err(String::from(format!("Couldn't get track info: {}", e)));
                     }
                 }
             }
             None => {
-                warn!("No Track");
+                return Err(String::from("No Track"));
             }
-        }  
+        }
+        Ok(())  
     }
 
-    pub fn stop(&mut self) {
+    pub fn stop(&mut self) -> Result<(), String> {
         match &self.track_handle {
             Some(t) => {
                 let info = tokio::task::block_in_place(move || {
@@ -225,9 +239,15 @@ impl AudioPlayer {
                                 warn!("Track is already ended");
                             }
                             _ => {
-                                t.stop().expect("Error stopping track");
-                                warn!("Stopped track");
-                                self.track_handle = None;
+                                match t.stop() {
+                                    Ok(_) => {
+                                        warn!("Stopped track");
+                                        self.track_handle = None;
+                                    }
+                                    Err(_) => {
+                                        return Err(String::from("Error stopping track"));
+                                    }
+                                } 
                             }
                         }
                     }
@@ -240,29 +260,39 @@ impl AudioPlayer {
                 warn!("No Track");
             }
         }
+        Ok(())
     }
 
-    pub fn hangup(&mut self) {
-        self.stop();
+    pub fn hangup(&mut self) -> Result<(), String> {
+        self.stop()?;
         self.clear_track_handle();
-        tokio::task::block_in_place(move || {
+        let hangup_result: Result<(), String> = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
                 let mut call = self.call_handle_lock.as_ref().unwrap().lock().await;
                 if let Some(_) = call.current_connection() {
-                    call.leave().await.expect("Error leaving call");
+                    //call.leave().await.expect("Error leaving call");
+                    match call.leave().await {
+                        Err(_) => {
+                            return Err(String::from("Error leaving call"));
+                        }
+                        _ => {} // if we succeed, just proceed with program flow
+                    }
                 }
                 else {
                     warn!("Not in a call");
                 }
+                Ok(())
             })
         });       
         warn!("Hung up");
+        return hangup_result;
     }
 
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) -> Result<(), String> {
         self.set_idle_check(TrackEndAction::NOTHING);
         self.cancel_timeout();
-        self.hangup();
+        self.hangup()?;
+        Ok(())
     }
 
     async fn join_summoner(&mut self, new_message: &Message, ctx: &Context) -> Result<(), ()> {
@@ -341,7 +371,6 @@ impl AudioPlayer {
             warn!("Nobody in any of the voice channels");
             return Err(());
         }
-    
     }
 
     async fn join_channel(&mut self, channel: &GuildChannel) -> JoinResult<()> {
@@ -383,7 +412,6 @@ impl AudioPlayer {
         // Record our track object
         self.set_track_handle(track_handle);
         return Ok(audio);
-        
     }
 
     fn play_only_track(&mut self, track: Track) {
@@ -413,13 +441,12 @@ impl AudioPlayer {
                 return Ok(String::from(&r[0]));
             }
         }
-
     }
 
-    async fn process_driveby(&mut self, ctx: Context, new_message: Message) {
+    async fn process_driveby(&mut self, ctx: &Context, new_message: &Message) -> Result<(), String> {
         match self.parse_url(&new_message) {
             Err(()) => {
-                error!("Told to driveby, but nothing given");
+                return Err(String::from("Told to driveby, but nothing given"));
             }
             Ok(r) => {
                 let url_to_play = r.as_str();
@@ -436,29 +463,27 @@ impl AudioPlayer {
                                 self.set_idle_check(TrackEndAction::LEAVE);
                                 // play our track
                                 self.play_only_track(t);
-                                react_driveby(&ctx, &new_message);
+                                //react_driveby(&ctx, &new_message);
                             }
                             Err(_) => {
-                                warn!("Couldn't find a channel with anyone in it");
-                                react_fail(&ctx, &new_message);
+                                return Err(String::from("Couldn't find a channel with anyone in it"));
                             }
                         }
                     }
                     Err(e) => {
-                        error!("Couldn't create youtube track: {}", e);
-                        react_fail(&ctx, &new_message);
+                        return Err(String::from(format!("Couldn't create youtube track: {}", e)));
                     }
                 }
             }
         }
-
+        Ok(())
     }
 
-    async fn process_play(&mut self, ctx: Context, new_message: Message) {
+    async fn process_play(&mut self, ctx: &Context, new_message: &Message) -> Result<(), String> {
 
         match self.parse_url(&new_message) {
             Err(()) => {
-                error!("told to play, but nothing given");
+                return Err(String::from("told to play, but nothing given"));
             }
             Ok(r) => {
                 let url_to_play = r.as_str();
@@ -477,23 +502,19 @@ impl AudioPlayer {
                                 self.set_idle_check(TrackEndAction::TIMEOUT);
                                 // play our track
                                 self.play_only_track(t);
-                                react_success(&ctx, &new_message);
-                                
                             }
                             Err(e) => {
-                                error!("Couldn't create youtube track: {}", e);
                                 // Leave bc we can't play shit
-                                self.hangup();
-                                react_fail(&ctx, &new_message);
+                                self.hangup()?;
+                                return Err(String::from(format!("Couldn't create youtube track: {}", e)));
                             }
                         }
                     }
                     Err(_) => {
-                        warn!("Couldn't find our summoner");
-                        react_fail(&ctx, &new_message);
+                        return Err(String::from("Couldn't find our summoner"));
                     }
-                    
                 }
+                Ok(())
             }
         }
     }
@@ -501,6 +522,54 @@ impl AudioPlayer {
 
 pub struct AudioPlayerHandler {
     audio_player: Arc<Mutex<AudioPlayer>>,
+}
+
+impl AudioPlayerHandler {
+    async fn handle_command(&self, ctx: &Context, new_message: &Message) -> Result<(), String> {
+        match new_message.content.as_str() {
+            "leave" => {
+                warn!("Told to leave");
+                let mut player = self.audio_player.lock().await;
+                player.hangup()?;
+                return Ok(());
+            }
+            "stop" => {
+                warn!("Told to stop");
+                let mut player = self.audio_player.lock().await;
+                player.stop()?;
+                return Ok(());
+            }
+            "pause" => {
+                warn!("Told to pause");
+                let player = self.audio_player.lock().await;
+                player.pause()?;
+                return Ok(());
+            }
+            "resume" => {
+                warn!("Told to resume");
+                let player = self.audio_player.lock().await;
+                player.resume()?;
+                return Ok(());
+            }
+            // Do our play matching below because "match" doesn't play well with contains
+            _ => {
+                if new_message.content.contains("play") {
+                    let mut player = self.audio_player.lock().await;
+                    player.process_play(&ctx, &new_message).await?;
+                    return Ok(());
+                }
+                else if new_message.content.contains("driveby") {
+                    let mut player = self.audio_player.lock().await;
+                    player.process_driveby(&ctx, &new_message).await?;
+                    return Ok(());
+                }
+                //else {
+                //    error!("We got a message here, but it isn't any we are interested in");
+                //}
+            }
+        }
+        return Err(String::from("No valid command found in message"));
+    }
 }
 
 #[async_trait]
@@ -521,40 +590,13 @@ impl EventHandler for AudioPlayerHandler {
     async fn message(&self, ctx: Context, new_message: Message) {
 
         if new_message.channel_id == ChannelId::from(766900346202882058) {
-            match new_message.content.as_str() {
-                "leave" => {
-                    warn!("Told to leave");
-                    let mut player = self.audio_player.lock().await;
-                    player.hangup();
+            match self.handle_command(&ctx, &new_message).await {
+                Ok(_) => {
+                    react_success(&ctx, &new_message);
                 }
-                "stop" => {
-                    warn!("Told to stop");
-                    let mut player = self.audio_player.lock().await;
-                    player.stop();
-                }
-                "pause" => {
-                    warn!("Told to pause");
-                    let player = self.audio_player.lock().await;
-                    player.pause();
-                }
-                "resume" => {
-                    warn!("Told to resume");
-                    let player = self.audio_player.lock().await;
-                    player.resume();
-                }
-                // Do our play matching below because "match" doesn't play well with contains
-                _ => {
-                    if new_message.content.contains("play") {
-                        let mut player = self.audio_player.lock().await;
-                        player.process_play(ctx, new_message).await;
-                    }
-                    else if new_message.content.contains("driveby") {
-                        let mut player = self.audio_player.lock().await;
-                        player.process_driveby(ctx, new_message).await;
-                    }
-                    else {
-                        error!("We got a message here, but it isn't any we are interested in");
-                    }
+                Err(e) => {
+                    error!("{}", e);
+                    react_fail(&ctx, &new_message);
                 }
             }
         }
@@ -595,7 +637,7 @@ impl SongBirdEventHandler for TrackEndCallback {
                             tokio::time::sleep(timeout).await; // We use tokio's sleep because it's abortable
                             warn!("Reached our timeout");
                             let mut player = player_clone.lock().await;
-                            player.shutdown();
+                            player.shutdown().unwrap();
                             warn!("shut down our player");
                         }))));
                         warn!("spawned tokio timeout task");
@@ -603,7 +645,7 @@ impl SongBirdEventHandler for TrackEndCallback {
                     // Leave immediately
                     TrackEndAction::LEAVE => {
                         warn!("Leaving the call");
-                        player.shutdown();
+                        player.shutdown().unwrap();
                     }
                     // Don't do anything, let it end and sit there
                     TrackEndAction::NOTHING => {
@@ -630,7 +672,7 @@ impl SongBirdEventHandler for TrackEndCallback {
                         Channel::Guild(c) => {
                             // Pretty stupid, but sometimes the members list reports the user that just left
                             // so wait a second for discord to properly register this person as gone
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                             let members = c.members(cache).await.expect("Error checking members in channel");
                             if members.len() > 1 { // 1 because the sniffer will be in this channel
                                 warn!("Still members in the channel, staying");
@@ -638,7 +680,7 @@ impl SongBirdEventHandler for TrackEndCallback {
                             else {    
                                 warn!("No more members in the channel, stopping");
                                 let mut player = self.audio_player.lock().await;
-                                player.hangup();
+                                player.hangup().unwrap();
                             }
                         }
                         _ => {
@@ -676,18 +718,6 @@ fn react_fail(ctx: &Context, message: &Message) {
                 animated: false,
                 id: EmojiId(886356280934006844),
                 name: Some(String::from(":final_pepe:")),
-            }).await.expect("Failed to react to post");
-        })
-    });
-}
-
-fn react_driveby(ctx: &Context, message: &Message) {
-    tokio::task::block_in_place(move || {
-        tokio::runtime::Handle::current().block_on(async move {
-            message.react(ctx.http.clone(), ReactionType::Custom{
-                animated: false,
-                id: EmojiId(740361878424911933),
-                name: Some(String::from(":anilblast:")),
             }).await.expect("Failed to react to post");
         })
     });
