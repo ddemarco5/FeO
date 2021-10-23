@@ -68,7 +68,7 @@ pub struct AudioPlayer {
 
 
 impl AudioPlayer {
-    pub async fn new(audio_channel: u64, queue_size: usize) -> (Arc<Mutex<AudioPlayer>>, AudioPlayerHandler) {
+    pub async fn new(audio_channel: u64, queue_size: usize, timeout: std::time::Duration) -> (Arc<Mutex<AudioPlayer>>, AudioPlayerHandler) {
         // The actual player object
         let player = Arc::new(Mutex::new(AudioPlayer {
             call_handle_lock: None,
@@ -93,7 +93,7 @@ impl AudioPlayer {
 
             player_locked.idle_callback_struct = Some(TrackEndCallback {
                 audio_player: player.clone(),
-                timeout: std::time::Duration::from_secs(30),
+                timeout: timeout,
             });
         }    
         return (player, handler);
