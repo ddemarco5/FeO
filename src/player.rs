@@ -193,7 +193,7 @@ impl AudioPlayer {
 
     /// Stops the player and clears the queue
     pub fn stop(&self, call: &mut Call) -> Result<(), String> {
-        call.stop();
+        call.queue().stop();
         Ok(())
     }
     
