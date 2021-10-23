@@ -1,11 +1,10 @@
 use std::sync::{Arc};
-use std::collections::VecDeque;
 use tokio::sync::{Mutex};
 
 use songbird::{
     {Songbird, Call},
     {ytdl, tracks::create_player},
-    tracks::{Track, TrackHandle, PlayMode, Queued},
+    tracks::{Track, PlayMode},
     driver::Bitrate,
     Event,
     EventContext,
@@ -31,14 +30,18 @@ use uuid::Uuid;
 static HELP_TEXT: &str =
 "```\n\
 help - show this\n\
-play 'url' - play the given url\n\
+play 'url' - plays the given url, inserts into the front of the queue\n\
 driveby 'url' - driveby a channel with the given url\n\
-queue 'url' - queue up the given url\n\
+queue 'url' - queue up the given url, starts playing if queue was empty\n\
 next 'url' - queue up the given url to play next\n\
+goto X (>0) - jump to and play the queue index given\n\
+rm X Y, etc (>0) - remove queue elements, provide indices separated by spaces\n\
 list - lists the current queue\n\
 pause - pause currently playing track\n\
 resume - resume a currently pause track\n\
-stop - stop the player\n\
+skip - skip the current track\n\
+clear - clears everything in the queue but the song playing \n\
+stop - stop the player, but don't leave\n\
 leave - tells the player to fuck outta here\n\
 ```\
 ";
@@ -48,7 +51,6 @@ use regex::Regex;
 
 #[derive(Clone, Debug)]
 enum TrackEndAction {
-    NOTHING,
     LEAVE,
     TIMEOUT,
 }
@@ -74,7 +76,7 @@ impl AudioPlayer {
             songbird: Songbird::serenity_from_config(
                 Config::default().preallocated_tracks(queue_size)
             ),
-            idle_callback_action: TrackEndAction::NOTHING,
+            idle_callback_action: TrackEndAction::TIMEOUT,
             idle_callback_struct: None,
             timeout_handle: None,
             cache_and_http: None,
@@ -189,21 +191,12 @@ impl AudioPlayer {
         Ok(())
     }
 
-    /// Stops the song currently playing in the queue
+    /// Stops the player and clears the queue
     pub fn stop(&self, call: &mut Call) -> Result<(), String> {
-        if let Some(h) = call.queue().current() {
-            self.stop_handle(h)?;
-        }
+        call.stop();
         Ok(())
     }
     
-    pub fn stop_handle(&self, handle: TrackHandle) -> Result<(), String> {
-        match handle.stop() {
-            Ok(_) => warn!("Stopped track handle"),
-            Err(e) => return Err(String::from(format!("Error stopping track handle: {}", e))),
-        }
-        Ok(())
-    }
 
     pub fn skip(&self, call: &mut Call) -> Result<(), String> {
         match call.queue().skip() {
@@ -240,7 +233,7 @@ impl AudioPlayer {
     }
 
     pub fn shutdown(&mut self) -> Result<(), String> {
-        self.set_idle_check(TrackEndAction::NOTHING);
+        //self.set_idle_check(TrackEndAction::NOTHING);
         self.cancel_timeout();
         self.hangup()?;
         Ok(())
@@ -384,7 +377,7 @@ impl AudioPlayer {
             // Due to limitations of the library, we can't stop and restart, we must pause
             self.pause(&mut call)?;
             drop(call); // drop our lock so we can cancel timeout
-            // This stop above will trigger our timeout routine, let's cancel it, as we want to play music
+            // There's a chance the timeout triggers when we're loading a track, this fixes that
             self.cancel_timeout();
             // and move new track to the frount of the queue.
             queue.modify_queue(
@@ -443,6 +436,14 @@ impl AudioPlayer {
         return Ok(num_vec);
     }
 
+    fn parse_goto(&self, message: &Message) -> Result<u32, String> {
+        let numbers = message.content.replace("goto ", "");
+        match numbers.parse::<u32>() {
+            Ok(num) => return Ok(num),
+            Err(e) => return Err(String::from(format!("Error parsing goto: {}", e))),
+        };
+    }
+
     async fn process_driveby(&mut self, ctx: &Context, new_message: &Message) -> Result<(), String> {
         match self.parse_url(&new_message) {
             Err(()) => {
@@ -489,8 +490,6 @@ impl AudioPlayer {
                         warn!("Successfully created track");
                         self.join_summoner(&new_message, &ctx).await?;
                         warn!("Joined summoner");
-                        // Add the idle event listener to the driver
-                        self.set_idle_check(TrackEndAction::TIMEOUT);
                         // play our track
                         warn!("playing");
                         self.play_only_track(t).await?;
@@ -505,7 +504,7 @@ impl AudioPlayer {
         }
     }
 
-    async fn process_enqueue(&mut self, new_message: &Message) -> Result<(), String> {
+    async fn process_enqueue(&mut self, ctx: &Context, new_message: &Message) -> Result<(), String> {
         match self.parse_url(&new_message) {
             Err(()) => {
                 return Err(String::from("told to queue, but nothing given"));
@@ -518,6 +517,8 @@ impl AudioPlayer {
                 match track {
                     Ok(t) => {
                         warn!("Successfully created track");
+                        self.join_summoner(&new_message, &ctx).await?;
+                        warn!("Joined summoner");
                         let mut call = self.call_handle_lock.as_ref().unwrap().lock().await;
                         call.enqueue(t);
                         warn!("Queued up track");
@@ -580,7 +581,7 @@ impl AudioPlayer {
     async fn process_rm(&mut self, new_message: &Message) -> Result<(), String> {
         
         let indices_to_rm = self.parse_rm(new_message)?;
-        
+
         // validate that none of our removals are larger than our playlist
         let playlist_len = {
             let call = self.call_handle_lock.as_ref().unwrap().lock().await;
@@ -590,7 +591,8 @@ impl AudioPlayer {
             return Err(String::from("Empty playlist"));
         }
         for ind in &indices_to_rm {
-            if *ind > playlist_len-1 {
+            // If our index is out of range or 0, the currently playing track
+            if (*ind > playlist_len-1) || (*ind < 1 ) {
                 return Err(String::from(format!("Index {} is invalid", ind)));
             }
         }
@@ -618,6 +620,72 @@ impl AudioPlayer {
             }
         )?;
 
+        Ok(())
+    }
+
+    async fn process_goto(&self, new_message: &Message) -> Result<(), String> {
+        // Process the goto command, but there's a trick... because of how we structure our queue,
+        // all we actually have to do is skip an equal amount of times as the track index we're given
+        let idx = self.parse_goto(new_message)?;
+        // make sure we've got some values that make sense for this function
+        if idx < 1 {
+            return Err(String::from("Tried to go to less than 1"));
+        }
+        // validate that none of our removals are larger than our playlist
+        let playlist_len = {
+            let call = self.call_handle_lock.as_ref().unwrap().lock().await;
+            call.queue().len()
+        };
+        if playlist_len == 0 {
+            return Err(String::from("Empty playlist"));
+        }
+        if idx as usize > playlist_len-1 {
+            return Err(String::from(format!("Index {} is invalid", idx)));
+        }
+        // Stop our current track
+        let call = self.call_handle_lock.as_ref().unwrap().lock().await;
+        if let Some(t) = call.queue().current() {
+            if let Err(e) = t.stop() {
+                return Err(String::from(format!("Error stopping track: {}", e)));
+            }
+        }
+        // Remove up to our index
+        call.queue().modify_queue(
+            |q| {
+                for _ in 0..idx {
+                    if let Some(t) = q.pop_front() {  // remove our track from the queue
+                        // If we got a track from the pop, stop it to avoid any memory leaks
+                        if let Err(e) = t.stop() {
+                            return Err(String::from(format!("Error stopping track in queue removal: {}", e)));
+                        }
+                    } 
+                }
+                Ok(())
+            }
+        )?;
+
+        match call.queue().resume() {
+            Ok(_) => warn!("Went to track, playing"),
+            Err(e) => return Err(String::from(format!("Error starting track after goto: {}", e))),
+        }
+        Ok(())
+    }
+
+    /// Remove all the tracks except the one currently playing
+    fn clear_queue(&self, call: &Call) -> Result<(), String> {
+
+        if call.queue().is_empty() {
+            return Err(String::from("Queue is empty, can't clear shit"));
+        }
+
+        // Remove up to our index
+        call.queue().modify_queue(
+            |q| {
+                // A this point we know the queue isn't empty, so go ahead and drain
+                q.drain(1..);
+            }
+        );
+        warn!("Cleared queued tracks");
         Ok(())
     }
 
@@ -655,7 +723,13 @@ impl AudioPlayer {
             false => {
                 for (i, track) in queue.iter().enumerate() {
                     let metadata = track.metadata();
-                    let mut track_string = String::from(format!("{} - ", i));
+                    let mut track_string = String::new();
+                    if i == 0 { // If we're at index 0, that's what we're currently playing
+                        track_string.push_str(">>> ");
+                    }
+                    else { // Otherwise we're actually a track index
+                        track_string.push_str(format!("{} - ", i).as_str());
+                    }
                     match &metadata.track {
                         Some(t) => {
                             track_string.push_str(format!("{}", t).as_str());
@@ -747,6 +821,13 @@ impl AudioPlayerHandler {
                 player.print_queue(&ctx)?;
                 return Ok(());
             }
+            "clear" => {
+                warn!("Told to clear track queue");
+                let player = self.audio_player.lock().await;
+                let call = player.call_handle_lock.as_ref().unwrap().lock().await;
+                player.clear_queue(&call)?;
+                return Ok(());
+            }
             // Do our play matching below because "match" doesn't play well with contains
             _ => {
                 if new_message.content.contains("play") {
@@ -761,7 +842,7 @@ impl AudioPlayerHandler {
                 }
                 else if new_message.content.contains("queue") {
                     let mut player = self.audio_player.lock().await;
-                    player.process_enqueue(&new_message).await?;
+                    player.process_enqueue(&ctx, &new_message).await?;
                     return Ok(());
                 }
                 else if new_message.content.contains("next") {
@@ -772,6 +853,11 @@ impl AudioPlayerHandler {
                 else if new_message.content.contains("rm") {
                     let mut player = self.audio_player.lock().await;
                     player.process_rm(&new_message).await?;
+                    return Ok(());
+                }
+                else if new_message.content.contains("goto") {
+                    let player = self.audio_player.lock().await;
+                    player.process_goto(&new_message).await?;
                     return Ok(());
                 }
             }
@@ -867,7 +953,7 @@ impl SongBirdEventHandler for TrackEndCallback {
                             }
                             else {
                                 player.shutdown().unwrap();
-                                warn!("shut down our player");
+                                warn!("Queue was empty, shutting down player");
                             }  
                         }))));
                         warn!("spawned tokio timeout task");
@@ -876,10 +962,6 @@ impl SongBirdEventHandler for TrackEndCallback {
                     TrackEndAction::LEAVE => {
                         warn!("Leaving the call");
                         player.shutdown().unwrap();
-                    }
-                    // Don't do anything, let it end and sit there
-                    TrackEndAction::NOTHING => {
-                        warn!("Do nothing, idle check is disabled")
                     }
                 }
             }
