@@ -605,7 +605,6 @@ impl AudioPlayer {
                 // Get our Queued objects we want to delete based on their source urls
                 for (i, item) in q.iter().enumerate() {
                     if indices_to_rm.contains(&i){
-                        warn!("Adding {:?} to remove list", item);
                         removalvec.push(item.uuid());
                         // Stop the track in case it happens to be playing
                         if let Err(e) = item.stop() {
