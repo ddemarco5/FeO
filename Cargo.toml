@@ -23,6 +23,7 @@ futures-locks = "*"
 songbird = { version = "0.2.0", features = ["serenity", "native", "builtin-queue"] }
 #songbird = "0.2.0"
 uuid = "*"
+logos = "0.12.0"
 
 [dependencies.serenity]
 default-features = false

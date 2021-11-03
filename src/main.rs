@@ -17,7 +17,8 @@ use std::fs::OpenOptions;
 
 mod reddit;
 mod discord;
-mod player;
+mod audio;
+mod commands;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Secrets {

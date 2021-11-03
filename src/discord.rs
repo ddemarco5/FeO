@@ -1,7 +1,8 @@
 // For sniffer post struct
 use crate::reddit::SnifferPost;
 use crate::Secrets;
-use crate::player::{AudioPlayer};
+use crate::audio::player::{AudioPlayer};
+use crate::commands::Parser;
 
 use std::sync::Arc;
 use tokio::select;
@@ -10,12 +11,81 @@ use tokio_util::sync::CancellationToken;
 
 // For Discord
 use serenity::{
-    model::{id::ChannelId},
+    prelude::*,
+    model::{id::{ChannelId, EmojiId}},
+    model::{event::ResumedEvent, gateway::{Ready, Activity}},
     client::{Client, bridge::gateway::ShardManager},
+    model::channel::{Message, ReactionType},
+    async_trait,
 };
 
 // Enable songbird register trait for serenity
 use songbird::SerenityInit;
+
+// The reset presence and activity action for both ready and result
+async fn set_status(ctx: &Context) {
+    ctx.reset_presence().await;
+    ctx.set_activity(Activity::watching("the sniffer")).await;
+}
+
+fn react_success(ctx: &Context, message: &Message) {
+    tokio::task::block_in_place(move || {
+        tokio::runtime::Handle::current().block_on(async move {
+            message.react(ctx.http.clone(), ReactionType::Custom{
+                animated: false,
+                id: EmojiId(801166698610294895),
+                name: Some(String::from(":guthchamp:")),
+            }).await.expect("Failed to react to post");
+        })
+    });
+}
+
+fn react_fail(ctx: &Context, message: &Message) {
+    tokio::task::block_in_place(move || {
+        tokio::runtime::Handle::current().block_on(async move {
+            message.react(ctx.http.clone(), ReactionType::Custom{
+                animated: false,
+                id: EmojiId(886356280934006844),
+                name: Some(String::from(":final_pepe:")),
+            }).await.expect("Failed to react to post");
+        })
+    });
+}
+
+struct BotEventHandler {
+    listen_channel: ChannelId,
+    parser: Parser,
+}
+
+#[async_trait]
+impl EventHandler for BotEventHandler {
+
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        warn!("Connected as {}, setting bot to online", ready.user.name);
+        set_status(&ctx).await;
+    }
+
+    async fn resume(&self, ctx: Context, _: ResumedEvent) {
+        warn!("Resumed (reconnected)");
+        set_status(&ctx).await;
+    }
+
+    async fn message(&self, ctx: Context, new_message: Message) {
+        // Make sure we're listening in our designated channel, and we ignore messages from ourselves
+        if (new_message.channel_id == self.listen_channel) && !new_message.author.bot {
+
+            match self.parser.process(&ctx, &new_message).await {
+                Ok(()) => {
+                    react_success(&ctx, &new_message);
+                }
+                Err(e) => {
+                    error!("{}", e);
+                    react_fail(&ctx, &new_message);
+                }
+            }
+        }
+    }
+}
 
 
 
@@ -28,7 +98,8 @@ pub struct DiscordBot {
     chat_channel: ChannelId,
     test_channel: ChannelId,
     archive_channel: ChannelId,
-    audio_player: Option<Arc<Mutex<AudioPlayer>>>,
+    audio_player: Arc<Mutex<AudioPlayer>>,
+    command_parser: Parser,
 }
 
 impl DiscordBot {
@@ -36,22 +107,25 @@ impl DiscordBot {
         info!("Created the discord bot");
         // Configure the client with your Discord bot token in the environment.
         let token = secrets.bot_token;
+        let audio_channel = ChannelId(secrets.audio_channel);
 
         // Create an audio player in a mutex and its serenity callback listener
-        let (audio_player_lock, audio_player_handler) = AudioPlayer::new(
+        let audio_player_lock = AudioPlayer::new(
             secrets.audio_channel, 
             10,
             std::time::Duration::from_secs(60),
         ).await;
         warn!("Created audio player instance");
 
+        // Create our command parser
+        let parser = Parser::new(audio_player_lock.clone()); // Give it the lock as it'll need to run audio commands
+
         // Create a new instance of the Client, logging in as a bot. This will
         // automatically prepend your bot token with "Bot ", which is a requirement
         // by Discord for bot users.
         let mut audioplayer = audio_player_lock.lock().await; // Lock the player so we can do some work
         let serenity_bot = Client::builder(&token)
-            //.event_handler(audioplayer.get_handler()) // Clone the audio player to keep ownership
-            .event_handler(audio_player_handler)
+            .event_handler(BotEventHandler{ listen_channel: audio_channel, parser: parser.clone() })
             .register_songbird_with(audioplayer.get_songbird())
             .await
             .expect("Error creating client");
@@ -72,7 +146,8 @@ impl DiscordBot {
                 chat_channel: ChannelId(secrets.main_channel), // main channel
                 test_channel: ChannelId(secrets.test_channel),
                 archive_channel: ChannelId(secrets.archive_channel), // the archive channel
-                audio_player: Some(audio_player_lock),
+                audio_player: audio_player_lock.clone(),
+                command_parser: parser,
             };
 
         return bot;
@@ -117,8 +192,8 @@ impl DiscordBot {
     //TODO: Find a way to make sure we can get the same instance of our original audio player
     async fn stop_audio(&self) {
         // If we have a player, hang up
-        if let Some(player_lock) = &self.audio_player {
-            let mut player = player_lock.lock().await;
+        //if let Some(player_lock) = &self.audio_player {
+            let mut player = self.audio_player.lock().await;
             if let Err(x) = player.shutdown() {
                 error!("Error shutting down player: {}", x);
             }
@@ -128,7 +203,7 @@ impl DiscordBot {
             // associated structs reflect the state immediately
 
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
+        //}
     }
 
     async fn stop_shards(&self) {
@@ -172,8 +247,9 @@ impl DiscordBot {
         warn!("Trying to send debug message");
         self.test_channel.say(&http, message.clone()).await.expect("Error sending test message");
     }
-
 }
+
+
 
 impl Clone for DiscordBot {
     fn clone(&self) -> Self {
@@ -192,6 +268,7 @@ impl Clone for DiscordBot {
             test_channel: self.test_channel.clone(),
             archive_channel: self.archive_channel.clone(),
             audio_player: self.audio_player.clone(),
+            command_parser: self.command_parser.clone(),
         }
     }
 }

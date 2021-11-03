@@ -20,19 +20,19 @@ use serenity::{
     CacheAndHttp,
     prelude::*,
     async_trait,
-    model::{id::{ChannelId, EmojiId}},
-    model::{event::ResumedEvent, gateway::{Ready, Activity}},
-    model::channel::{Message, ChannelType, Channel, GuildChannel, ReactionType},
+    model::{id::{ChannelId}},
+    model::channel::{Message, ChannelType, Channel, GuildChannel},
 };
 
 use uuid::Uuid;
+use crate::commands::Token;
 
 static HELP_TEXT: &str =
 "```\n\
 help - show this\n\
 play 'url' - plays the given url, inserts into the front of the queue\n\
 driveby 'url' - driveby a channel with the given url\n\
-queue 'url' - queue up the given url, starts playing if queue was empty\n\
+queue 'url' * - queue up the given url(s), starts playing if queue was empty\n\
 next 'url' - queue up the given url to play next\n\
 goto X (>0) - jump to and play the queue index given\n\
 rm X Y, etc (>0) - remove queue elements, provide indices separated by spaces\n\
@@ -46,8 +46,25 @@ leave - tells the player to fuck outta here\n\
 ```\
 ";
 
-// For our url regex matching
-use regex::Regex;
+// macro to break our tokio lock out of async
+macro_rules! lock_call {
+    ($a:expr) => {
+        {
+            tokio::task::block_in_place(move || {
+                tokio::runtime::Handle::current().block_on(async move {
+                    $a.as_ref().unwrap().lock().await
+                })
+            })
+        }
+    };
+}
+macro_rules! lock_call_async {
+    ($a:expr) => {
+        {
+                    $a.as_ref().unwrap().lock().await
+        }
+    };
+}
 
 #[derive(Clone, Debug)]
 enum TrackEndAction {
@@ -63,16 +80,15 @@ pub struct AudioPlayer {
     idle_callback_struct: Option<TrackEndCallback>,
     timeout_handle: Option<Arc<Mutex<tokio::task::JoinHandle<()>>>>,
     cache_and_http: Option<std::sync::Arc<CacheAndHttp>>,
-    audio_text_channel: ChannelId,
+    pub audio_text_channel: ChannelId,
 }
 
 
 impl AudioPlayer {
-    pub async fn new(audio_channel: u64, queue_size: usize, timeout: std::time::Duration) -> (Arc<Mutex<AudioPlayer>>, AudioPlayerHandler) {
+    pub async fn new(audio_channel: u64, queue_size: usize, timeout: std::time::Duration) -> Arc<Mutex<AudioPlayer>> {
         // The actual player object
         let player = Arc::new(Mutex::new(AudioPlayer {
             call_handle_lock: None,
-            //songbird: Songbird::serenity(),
             songbird: Songbird::serenity_from_config(
                 Config::default().preallocated_tracks(queue_size)
             ),
@@ -82,21 +98,18 @@ impl AudioPlayer {
             cache_and_http: None,
             audio_text_channel: ChannelId(audio_channel),
         }));
-        // The player's event handler
-        let handler = AudioPlayerHandler{
-            audio_player: player.clone(),
-            audio_text_channel: ChannelId(audio_channel), // Keep a copy of the text channel in there
-        };
-        // Create the callback structure
+        
+        // Get the lock on our player so we can modify it
         {
             let mut player_locked = player.lock().await;
-
+            
+            // Create the callback structure
             player_locked.idle_callback_struct = Some(TrackEndCallback {
                 audio_player: player.clone(),
                 timeout: timeout,
             });
         }    
-        return (player, handler);
+        return player;
     }
 
     /// Give songbird the information it needs to join a call as a bots
@@ -161,13 +174,11 @@ impl AudioPlayer {
         }
     }
 
-    // The reset presence and activity action for both ready and result
-    async fn set_status(&self, ctx: &Context) {
-        ctx.reset_presence().await;
-        ctx.set_activity(Activity::watching("the sniffer")).await;
+    pub fn pause_locking(&self) -> Result<(), String> {
+        let mut call = lock_call!(self.call_handle_lock);
+        self.pause(&mut call)
     }
-
-    pub fn pause(&self, call: &mut Call) -> Result<(), String> {
+    fn pause(&self, call: &mut Call) -> Result<(), String> {
         match call.queue().pause() {
             Ok(_) => {
                 warn!("Paused track");
@@ -179,7 +190,11 @@ impl AudioPlayer {
         Ok(())
     }
 
-    pub fn resume(&self, call: &mut Call) -> Result<(), String> {
+    pub fn resume_locking(&self) -> Result<(), String> {
+        let mut call = lock_call!(self.call_handle_lock);
+        self.resume(&mut call)
+    }
+    fn resume(&self, call: &mut Call) -> Result<(), String> {
         match call.queue().resume() {
             Ok(_) => {
                 warn!("Resumed track");
@@ -192,13 +207,20 @@ impl AudioPlayer {
     }
 
     /// Stops the player and clears the queue
-    pub fn stop(&self, call: &mut Call) -> Result<(), String> {
+    pub fn stop_locking(&self) -> Result<(), String> {
+        let mut call = lock_call!(self.call_handle_lock);
+        self.stop(&mut call)
+    }
+    fn stop(&self, call: &mut Call) -> Result<(), String> {
         call.queue().stop();
         Ok(())
     }
     
-
-    pub fn skip(&self, call: &mut Call) -> Result<(), String> {
+    pub fn skip_locking(&self) -> Result<(), String> {
+        let mut call = lock_call!(self.call_handle_lock);
+        self.skip(&mut call)
+    }
+    fn skip(&self, call: &mut Call) -> Result<(), String> {
         match call.queue().skip() {
             Ok(_) => {
                 warn!("Skipping track");
@@ -233,7 +255,6 @@ impl AudioPlayer {
     }
 
     pub fn shutdown(&mut self) -> Result<(), String> {
-        //self.set_idle_check(TrackEndAction::NOTHING);
         self.cancel_timeout();
         self.hangup()?;
         Ok(())
@@ -359,7 +380,6 @@ impl AudioPlayer {
         let (audio, _track_handle) = create_player(youtube_input);
         // Give it the handle to end the call if need be
         // Record our track object
-        //self.set_track_handle(track_handle);
         return Ok(audio);
     }
 
@@ -402,174 +422,144 @@ impl AudioPlayer {
         Ok(())
     }
 
-    fn parse_url(&self, message: &Message) -> Result<String, ()> {
-        lazy_static! {
-            // Returns the whole string to replace in the first capture, contents of [] in 2nd and () in 3rd
-            //static ref RE: Regex = Regex::new(r"https://\S*youtu\S*").unwrap();
-            static ref RE: Regex = Regex::new(r"https://\S*").unwrap();
-        }
 
-        match RE.captures(message.content.as_str()) {
-            None => {
-                error!("regex failed to match url");
-                return Err(());
-            }
-            Some(r) => {
-                return Ok(String::from(&r[0]));
-            }
+    pub async fn process_driveby(&mut self, ctx: &Context, new_message: &Message, args: Vec<Token>) -> Result<(), String> {
+        if args.len() > 1 {
+            return Err(String::from("Too many arguments given to driveby"));
         }
-    }
-
-    // TODO: this shit, but better
-    fn parse_rm(&self, message: &Message) -> Result<Vec<usize>, String> {
-        let numbers = message.content.replace("rm ", "");
-        let spliterator = numbers.split(" ");
-        let mut num_vec: Vec<usize> = Vec::new();
-        for num_str in spliterator {
-            match num_str.parse::<usize>() {
-                Ok(num) => num_vec.push(num),
+        if let Token::Generic(url_to_play) = args.first().unwrap() {
+            warn!("Told to play {}", url_to_play);
+            // Remove the timeout so we don't accidentally hang up while we process
+            self.cancel_timeout();
+            // Play the track
+            warn!("driveby with {}", url_to_play);
+            // Load up our song
+            let track = match self.make_ytdl_track(url_to_play).await {
+                Ok(t) => t,
                 Err(e) => {
-                    return Err(String::from(format!("Error parsing rm numbers: {}", e)));
+                    return Err(String::from(format!("Error making yt track: {}", e)));
                 }
-            }
-        }
-        return Ok(num_vec);
-    }
+            };
+            warn!("Successfully loaded track, pullin up");
+            // Join channel with the most people
 
-    fn parse_goto(&self, message: &Message) -> Result<u32, String> {
-        let numbers = message.content.replace("goto ", "");
-        match numbers.parse::<u32>() {
-            Ok(num) => return Ok(num),
-            Err(e) => return Err(String::from(format!("Error parsing goto: {}", e))),
-        };
-    }
-
-    async fn process_driveby(&mut self, ctx: &Context, new_message: &Message) -> Result<(), String> {
-        match self.parse_url(&new_message) {
-            Err(()) => {
-                return Err(String::from("Told to driveby, but nothing given"));
-            }
-            Ok(r) => {
-                let url_to_play = r.as_str();
-                warn!("driveby with {}", url_to_play);
-                // Load up our song
-                let track = match self.make_ytdl_track(url_to_play).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        return Err(String::from(format!("Error making yt track: {}", e)));
-                    }
-                };
-                warn!("Successfully loaded track, pullin up");
-                // Join channel with the most people
-
-                self.join_most_crowded(&new_message, &ctx).await?;
-                // Get out of there when we're done
-                self.set_idle_check(TrackEndAction::LEAVE);
-                // play our track
-                self.play_only_track(track).await?;
-            }
+            self.join_most_crowded(&new_message, &ctx).await?;
+            // Get out of there when we're done
+            self.set_idle_check(TrackEndAction::LEAVE);
+            // play our track
+            self.play_only_track(track).await?;
+            // Clear the queue after we join
+            self.clear_queue_locking()?;
         }
         Ok(())
     }
 
-    async fn process_play(&mut self, ctx: &Context, new_message: &Message) -> Result<(), String> {
+    pub async fn process_play(&mut self, ctx: &Context, new_message: &Message, args: Vec<Token>) -> Result<(), String> {
 
-        match self.parse_url(&new_message) {
-            Err(()) => {
-                return Err(String::from("told to play, but nothing given"));
-            }
-            Ok(r) => {
-                let url_to_play = r.as_str();
-                warn!("Told to play {}", url_to_play);
-                // Remove the timeout so we don't accidentally hang up while we process
-                self.cancel_timeout();
-                // Play the track
-                let track = self.make_ytdl_track(url_to_play).await;
-                match track {
-                    Ok(t) => {
-                        warn!("Successfully created track");
-                        self.join_summoner(&new_message, &ctx).await?;
-                        warn!("Joined summoner");
-                        // play our track
-                        warn!("playing");
-                        self.play_only_track(t).await?;
-                    }
-                    Err(e) => {
-                        // Leave bc we can't play shit
-                        return Err(String::from(format!("Couldn't create track: {}", e)));
-                    }
-                }
-                Ok(())
-            }
+        if args.len() > 1 {
+            return Err(String::from("Too many arguments given to play"));
         }
+        if let Token::Generic(url_to_play) = args.first().unwrap() {
+            warn!("Told to play {}", url_to_play);
+            // Remove the timeout so we don't accidentally hang up while we process
+            self.cancel_timeout();
+            // Play the track
+            let track = self.make_ytdl_track(url_to_play.as_str()).await;
+            match track {
+                Ok(t) => {
+                    warn!("Successfully created track");
+                    // Make sure our idle action is set to timeout
+                    self.set_idle_check(TrackEndAction::TIMEOUT);
+                    self.join_summoner(&new_message, &ctx).await?;
+                    warn!("Joined summoner");
+                    // play our track
+                    warn!("playing");
+                    self.play_only_track(t).await?;
+                }
+                Err(e) => {
+                    // Leave bc we can't play shit
+                    return Err(String::from(format!("Couldn't create track: {}", e)));
+                }
+            }
+        } 
+        Ok(())
     }
 
-    async fn process_enqueue(&mut self, ctx: &Context, new_message: &Message) -> Result<(), String> {
-        match self.parse_url(&new_message) {
-            Err(()) => {
-                return Err(String::from("told to queue, but nothing given"));
-            }
-            Ok(r) => {
-                let url_to_play = r.as_str();
-                warn!("Told to queue {}", url_to_play);
-                // Make the track
-                let track = self.make_ytdl_track(url_to_play).await;
-                match track {
-                    Ok(t) => {
-                        warn!("Successfully created track");
-                        self.join_summoner(&new_message, &ctx).await?;
-                        warn!("Joined summoner");
-                        let mut call = self.call_handle_lock.as_ref().unwrap().lock().await;
-                        call.enqueue(t);
-                        warn!("Queued up track");
-                    }
-                    Err(e) => {
-                        return Err(String::from(format!("Couldn't create track: {}", e)));
+    pub async fn process_enqueue(&mut self, ctx: &Context, new_message: &Message, args: Vec<Token>) -> Result<(), String> {
+
+        if args.is_empty() {
+            return Err(String::from("told to queue, but nothing given"));
+        }
+
+        let mut tracks = Vec::<Track>::new();
+        for url_to_play in args {
+            match url_to_play {
+                Token::Generic(url) => {
+                    warn!("Told to queue {}", url);
+                    // Make the track
+                    match self.make_ytdl_track(url.as_str()).await {
+                        Ok(t) => {
+                            warn!("Successfully created track");
+                            tracks.push(t);
+                        }
+                        Err(e) => {
+                            return Err(String::from(format!("Couldn't create track: {}", e)));
+                        }
                     }
                 }
-                Ok(())
+                _ => {
+                    return Err(String::from("given invalid token to play"));
+                }
             }
         }
+        // If we get here it means we have a vec of successfully created tracks
+        //Join the call
+        self.join_summoner(&new_message, &ctx).await?;
+        warn!("Joined summoner");
+        // Make sure our idle action is set to timeout
+        self.set_idle_check(TrackEndAction::TIMEOUT);
+        let mut call = lock_call_async!(self.call_handle_lock);
+        for track in tracks {
+            call.enqueue(track);
+            warn!("Queued track");
+        }
+        Ok(())
     }
 
-    async fn process_next(&mut self, ctx: &Context, new_message: &Message) -> Result<(), String> {
+    pub async fn process_next(&mut self, ctx: &Context, new_message: &Message, args: Vec<Token>) -> Result<(), String> {
+        let call_handle_lock = self.call_handle_lock.clone();
         let queue = {
-            let call = self.call_handle_lock.as_ref().unwrap().lock().await;
+            //let call = self.call_handle_lock.as_ref().unwrap().lock().await;
+            let call = lock_call_async!(self.call_handle_lock);
             call.queue().clone()
         };
        
         match queue.is_empty() {
             true => {
                 warn!("queue is empty, just load a basic track");
-                self.process_play(ctx, new_message).await?;
+                self.process_play(ctx, new_message, args).await?;
             }
             false => {
-                match self.parse_url(&new_message) {
-                    Err(()) => {
-                        return Err(String::from("told to queue next, but nothing given"));
-                    }
-                    Ok(r) => {
-                        let url_to_play = r.as_str();
-                        warn!("Told to queue next {}", url_to_play);
-                        // Make the track
-                        let track = self.make_ytdl_track(url_to_play).await;
-                        match track {
-                            Ok(t) => {
-                                warn!("Successfully created track");
-                                // Queue up the track, and rearrange it so it'll come after what's currently playing
-                                let mut call = self.call_handle_lock.as_ref().unwrap().lock().await;
-                                call.enqueue(t);
-                                call.queue().modify_queue(
-                                    |q| {
-                                        // pop our track from the back and set it to be the next track
-                                        let new_track = q.pop_back().unwrap();
-                                        q.insert(1, new_track);
-                                    }
-                                );
-                            }
-                            Err(e) => {
-                                return Err(String::from(format!("Couldn't create track: {}", e)));
-                            }
+                if let Token::Generic(url_to_play) = args.first().unwrap() {
+                    warn!("Told to queue next {}", url_to_play);
+                    // Make the track
+                    let track = self.make_ytdl_track(url_to_play).await;
+                    match track {
+                        Ok(t) => {
+                            warn!("Successfully created track");
+                            // Queue up the track, and rearrange it so it'll come after what's currently playing
+                            let mut call = lock_call_async!(call_handle_lock);
+                            call.enqueue(t);
+                            call.queue().modify_queue(
+                                |q| {
+                                    // pop our track from the back and set it to be the next track
+                                    let new_track = q.pop_back().unwrap();
+                                    q.insert(1, new_track);
+                                }
+                            );
+                        }
+                        Err(e) => {
+                            return Err(String::from(format!("Couldn't create track: {}", e)));
                         }
                     }
                 }
@@ -578,9 +568,24 @@ impl AudioPlayer {
         Ok(())
     }
 
-    async fn process_rm(&mut self, new_message: &Message) -> Result<(), String> {
+    pub async fn process_rm(&mut self, args: Vec<Token>) -> Result<(), String> {
         
-        let indices_to_rm = self.parse_rm(new_message)?;
+        //let indices_to_rm = self.parse_rm(new_message)?;
+
+        let mut indices_to_rm = Vec::<usize>::new();
+        for idx in args {
+            match idx {
+                Token::Generic(s) => {
+                    match s.parse::<u32>() {
+                        Ok(idx) => indices_to_rm.push(idx as usize),
+                        Err(e) => return Err(String::from(format!("Couldn't parse index from argument: {}", e))),
+                    }
+                }
+                _ => {
+                    return Err(String::from("Invalid token"));
+                }
+            }
+        }
 
         // validate that none of our removals are larger than our playlist
         let playlist_len = {
@@ -622,10 +627,22 @@ impl AudioPlayer {
         Ok(())
     }
 
-    async fn process_goto(&self, new_message: &Message) -> Result<(), String> {
+    pub async fn process_goto(&self, args: Vec<Token>) -> Result<(), String> {
         // Process the goto command, but there's a trick... because of how we structure our queue,
         // all we actually have to do is skip an equal amount of times as the track index we're given
-        let idx = self.parse_goto(new_message)?;
+        //let idx = self.parse_goto(new_message)?;
+        let idx = match args.first().unwrap() {
+            Token::Generic(s) => {
+                //let idx = s.parse::<u32>();
+                match s.parse::<u32>() {
+                    Ok(idx) => idx,
+                    Err(e) => return Err(String::from(format!("Couldn't parse index from argument: {}", e))),
+                }
+            }
+            _ => {
+                return Err(String::from("Invalid token given"));
+            }
+        };
         // make sure we've got some values that make sense for this function
         if idx < 1 {
             return Err(String::from("Tried to go to less than 1"));
@@ -671,6 +688,10 @@ impl AudioPlayer {
     }
 
     /// Remove all the tracks except the one currently playing
+    pub fn clear_queue_locking(&self) -> Result<(), String> {
+        let mut call = lock_call!(self.call_handle_lock);
+        self.clear_queue(&mut call)
+    }
     fn clear_queue(&self, call: &Call) -> Result<(), String> {
 
         if call.queue().is_empty() {
@@ -688,7 +709,7 @@ impl AudioPlayer {
         Ok(())
     }
 
-    fn print_help(&self, ctx: &Context) -> Result<(), String> {
+    pub fn print_help(&self, ctx: &Context) -> Result<(), String> {
         // Print a help message to the audio text channel
         let send_result = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
@@ -706,7 +727,7 @@ impl AudioPlayer {
         };
     }
 
-    fn print_queue(&self, ctx: &Context) -> Result<(), String> {
+    pub fn print_queue(&self, ctx: &Context) -> Result<(), String> {
         let call = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
                 self.call_handle_lock.as_ref().unwrap().lock().await
@@ -766,135 +787,6 @@ impl AudioPlayer {
 
 }
 
-pub struct AudioPlayerHandler {
-    audio_player: Arc<Mutex<AudioPlayer>>,
-    audio_text_channel: ChannelId
-}
-
-impl AudioPlayerHandler {
-    async fn handle_command(&self, ctx: &Context, new_message: &Message) -> Result<(), String> {
-        match new_message.content.as_str() {
-            "help" => {
-                warn!("Asked to print help text");
-                let player = self.audio_player.lock().await;
-                player.print_help(&ctx)?;
-                return Ok(());
-            }
-            "leave" => {
-                warn!("Told to leave");
-                let mut player = self.audio_player.lock().await;
-                player.hangup()?;
-                return Ok(());
-            }
-            "stop" => {
-                warn!("Told to stop");
-                let player = self.audio_player.lock().await;
-                let mut call = player.call_handle_lock.as_ref().unwrap().lock().await;
-                player.stop(&mut call)?;
-                return Ok(());
-            }
-            "pause" => {
-                warn!("Told to pause");
-                let player = self.audio_player.lock().await;
-                let mut call = player.call_handle_lock.as_ref().unwrap().lock().await;
-                player.pause(&mut call)?;
-                return Ok(());
-            }
-            "resume" => {
-                warn!("Told to resume");
-                let player = self.audio_player.lock().await;
-                let mut call = player.call_handle_lock.as_ref().unwrap().lock().await;
-                player.resume(&mut call)?;
-                return Ok(());
-            }
-            "skip" => {
-                warn!("Told to skip");
-                let player = self.audio_player.lock().await;
-                let mut call = player.call_handle_lock.as_ref().unwrap().lock().await;
-                player.skip(&mut call)?;
-                return Ok(());
-            }
-            "list" => {
-                warn!("Told to print track queue");
-                let player = self.audio_player.lock().await;
-                player.print_queue(&ctx)?;
-                return Ok(());
-            }
-            "clear" => {
-                warn!("Told to clear track queue");
-                let player = self.audio_player.lock().await;
-                let call = player.call_handle_lock.as_ref().unwrap().lock().await;
-                player.clear_queue(&call)?;
-                return Ok(());
-            }
-            // Do our play matching below because "match" doesn't play well with contains
-            _ => {
-                if new_message.content.contains("play") {
-                    let mut player = self.audio_player.lock().await;
-                    player.process_play(&ctx, &new_message).await?;
-                    return Ok(());
-                }
-                else if new_message.content.contains("driveby") {
-                    let mut player = self.audio_player.lock().await;
-                    player.process_driveby(&ctx, &new_message).await?;
-                    return Ok(());
-                }
-                else if new_message.content.contains("queue") {
-                    let mut player = self.audio_player.lock().await;
-                    player.process_enqueue(&ctx, &new_message).await?;
-                    return Ok(());
-                }
-                else if new_message.content.contains("next") {
-                    let mut player = self.audio_player.lock().await;
-                    player.process_next(&ctx, &new_message).await?;
-                    return Ok(());
-                }
-                else if new_message.content.contains("rm") {
-                    let mut player = self.audio_player.lock().await;
-                    player.process_rm(&new_message).await?;
-                    return Ok(());
-                }
-                else if new_message.content.contains("goto") {
-                    let player = self.audio_player.lock().await;
-                    player.process_goto(&new_message).await?;
-                    return Ok(());
-                }
-            }
-        }
-        return Err(String::from("No valid command found in message"));
-    }
-}
-
-#[async_trait]
-impl EventHandler for AudioPlayerHandler {
-
-    async fn ready(&self, ctx: Context, ready: Ready) {
-        warn!("Connected as {}, setting bot to online", ready.user.name);
-        let player = self.audio_player.lock().await;
-        player.set_status(&ctx).await;
-    }
-
-    async fn resume(&self, ctx: Context, _: ResumedEvent) {
-        warn!("Resumed (reconnected)");
-        let player = self.audio_player.lock().await;
-        player.set_status(&ctx).await;
-    }
-
-    async fn message(&self, ctx: Context, new_message: Message) {
-        // Make sure we're listening in our designated channel, and we ignore messages from ourselves
-        if (new_message.channel_id == self.audio_text_channel) && !new_message.author.bot {
-            match self.handle_command(&ctx, &new_message).await {
-                Ok(_) => {
-                    react_success(&ctx, &new_message);
-                }
-                Err(e) => {
-                    error!("{}", e);
-                    react_fail(&ctx, &new_message);
-                }
-            }
-        }
-    }
-}
 
 // Very specific struct only for the purpose of leaving the call if nothing is playing after an idle timeout
 #[derive(Clone)]
@@ -1008,28 +900,4 @@ impl SongBirdEventHandler for TrackEndCallback {
         
         return None;
     }
-}
-
-fn react_success(ctx: &Context, message: &Message) {
-    tokio::task::block_in_place(move || {
-        tokio::runtime::Handle::current().block_on(async move {
-            message.react(ctx.http.clone(), ReactionType::Custom{
-                animated: false,
-                id: EmojiId(801166698610294895),
-                name: Some(String::from(":guthchamp:")),
-            }).await.expect("Failed to react to post");
-        })
-    });
-}
-
-fn react_fail(ctx: &Context, message: &Message) {
-    tokio::task::block_in_place(move || {
-        tokio::runtime::Handle::current().block_on(async move {
-            message.react(ctx.http.clone(), ReactionType::Custom{
-                animated: false,
-                id: EmojiId(886356280934006844),
-                name: Some(String::from(":final_pepe:")),
-            }).await.expect("Failed to react to post");
-        })
-    });
 }
