@@ -7,6 +7,7 @@ use tokio::{
     select,
 };
 
+use std::env;
 use std::time::Duration;
 
 #[macro_use]
@@ -34,6 +35,13 @@ pub struct Secrets {
 #[tokio::main]
 async fn main() {
 
+    let args: Vec<String> = env::args().collect();
+    let mut will_sniff = true;
+    println!("args len {}", args.len());
+    if args.len() > 1 { // 1 is the invocation
+        will_sniff = false;
+    }
+
     // Create our log file
     let config = LogConfigBuilder::builder()
         .path("./sniffer_log.txt")
@@ -53,61 +61,81 @@ async fn main() {
     let secrets: Secrets = serde_yaml::from_reader(file).expect("Serde error deserializing secrets");
     debug!("{:?}", secrets.clone());
 
-    // Create our api interfaces
-    let mut reddit = reddit::RedditScraper::new(secrets.sniffer.clone());
 
-
-    let mut discord_bot = discord::DiscordBot::new(secrets).await;
+    let mut discord_bot = discord::DiscordBot::new(secrets.clone()).await;
     discord_bot.start_shards(1).await;
     
 
     // Clone discord bot to use in a thread
     let discord_bot_clone = discord_bot.clone();
     // Run in a loop to wait for the sniffer to strike again
-    let run_token = tokio::spawn(async move {
-        warn!("Starting scraper thread");
-        loop {
-            // Check every X seconds
-            sleep(Duration::from_secs(45)).await;
-            match reddit.update() {
-                Ok(message_opt) => {
-                    match message_opt {
-                        Some(messages) => {
-                            warn!("Got {} new messages", messages.len());
-                            //let lock = discord_bot_clone.read().await;
-                            for message in messages {
-                                warn!("New sniffer message!:\n{}", message);
-                                //lock.post_message(message).await;
-                                discord_bot_clone.post_message(message).await;
-                            }    
-                        },
-                        None => {
-                            debug!("No new sniffer message");
-                        },
+    let mut run_token = None;
+    if will_sniff {
+        // Create our api interfaces
+        let mut reddit = reddit::RedditScraper::new(secrets.sniffer.clone());
+        run_token = Some(tokio::spawn(async move {
+            warn!("Starting scraper thread");
+            loop {
+                // Check every X seconds
+                sleep(Duration::from_secs(45)).await;
+                match reddit.update() {
+                    Ok(message_opt) => {
+                        match message_opt {
+                            Some(messages) => {
+                                warn!("Got {} new messages", messages.len());
+                                //let lock = discord_bot_clone.read().await;
+                                for message in messages {
+                                    warn!("New sniffer message!:\n{}", message);
+                                    //lock.post_message(message).await;
+                                    discord_bot_clone.post_message(message).await;
+                                }    
+                            },
+                            None => {
+                                debug!("No new sniffer message");
+                            },
+                        }
+                    }
+                    Err(error) => {
+                        error!("Encountered an error\n{}\nskipping this loop", error);
                     }
                 }
-                Err(error) => {
-                    error!("Encountered an error\n{}\nskipping this loop", error);
-                }
             }
-        }
-    });
+        }));
+    }
+    
 
     // Clone discord bot to use in a thread
     let discord_bot_clone = discord_bot.clone();
-    let future_wait = tokio::spawn(async move {
-        select! {
-            _ = wait_token(run_token) => {
-                warn!("Bot thread stopped")
+    // uggo but whatevs
+    let mut future_wait = None;
+    if let Some(token) = run_token {
+        future_wait = Some(tokio::spawn(async move {
+            select! {
+                _ = wait_token(token) => {
+                    warn!("Bot thread stopped")
+                }
+                _ = wait_sigint() => {
+                    warn!("Got SIGINT");
+                    // Kill our shards
+                    //discord_bot_clone.write().await.stop_shards().await;
+                    discord_bot_clone.shutdown().await;
+                }
+            };
+        }));
+    }
+    else {
+        future_wait = Some(tokio::spawn(async move {
+            select! {
+                _ = wait_sigint() => {
+                    warn!("Got SIGINT");
+                    // Kill our shards
+                    //discord_bot_clone.write().await.stop_shards().await;
+                    discord_bot_clone.shutdown().await;
+                }
             }
-            _ = wait_sigint() => {
-                warn!("Got SIGINT");
-                // Kill our shards
-                //discord_bot_clone.write().await.stop_shards().await;
-                discord_bot_clone.shutdown().await;
-            }
-        };
-    });
+        }));
+    }
+    
 
 
     //discord_bot.clone().read().await.print_shard_info().await;
@@ -116,7 +144,9 @@ async fn main() {
     println!("Ctrl-C to exit...");
     
     
-    future_wait.await.expect("failed to wait for run token");
+    if let Some(future) = future_wait {
+        future.await.expect("failed to wait for run token");
+    }
     
     println!("Gooby!");
 
