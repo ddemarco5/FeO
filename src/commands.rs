@@ -69,10 +69,11 @@ impl AudioCommands {
         &[Token::Clear],
         &[Token::Stop],
         &[Token::Leave],
+        &[Token::Search, Token::Arguments],
         &[Token::Play, Token::Argument],
         &[Token::Play, Token::Search, Token::Arguments],
         &[Token::Driveby, Token::Argument],
-        &[Token::Driveby, Token::Search, Token::Argument],
+        &[Token::Driveby, Token::Search, Token::Arguments],
         &[Token::Queue, Token::Arguments],
         &[Token::Next, Token::Arguments],
         &[Token::Goto, Token::Argument],
@@ -90,7 +91,7 @@ pub fn tokenize(string: &String) -> Result<(Vec<Token>, Option<Vec<Token>>), Str
     let tokens: Vec<Token> = tokenized.iter().map(|x| x.0.clone()).collect(); // Collect all the Tokens into a vector, drop the span
     // Big yucky, but it goes through tokens and keeps everything that's a generic into a new vec
     let args = tokens.iter().cloned().filter(|x| { if let Token::Generic(_) = x { return true } false } ).collect();
-    warn!("These are the args: {:?}", args);
+    //warn!("These are the args: {:?}", args);
     if tokens.is_empty() {
         return Err(String::from("No tokens parsed in string"));
     }
@@ -207,7 +208,7 @@ impl Parser {
     // Our function matching table
     pub async fn process(&self, ctx: &Context, msg: &Message) -> Result<(), String> {
         let (matched, args) = self.match_tokens(msg)?;
-        warn!("Matched {:?} with args {:?}", matched, args);
+        //warn!("Matched {:?} with args {:?}", matched, args);
         match &matched[..] { // vec to slice (array) for nice matching
             [Token::Help] => {
                 let locked_player = self.audio_player.lock().await;
@@ -251,7 +252,7 @@ impl Parser {
                 locked_player.process_play_url(&ctx, &msg, args.unwrap()).await?;
 
             },
-            [Token::Play, Token::Search] => {
+            [Token::Play, Token::Search] | [Token::Search] => {
                 let mut locked_player = self.audio_player.lock().await;
                 let search_string = generic_tokens_to_string(args.unwrap()).unwrap();
                 //locked_player.process_play_search(&ctx, &msg, args.unwrap()).await?;
@@ -300,37 +301,39 @@ impl Parser {
 pub static HELP_TEXT: &str =
 "```\n\
 play \"url\"\n\
-    -plays the given url, inserts into the front of the queue\n\
+\t-plays the given url, inserts into the front of the queue\n\
 play search \"song name\"\n\
-    -searches youtube and plays what you enter\n\
+\t-searches youtube and plays what you enter\n\
+search \"song name\"\n\
+\t-the same thing as play search\n\
 driveby \"url\"\n\
-    -driveby a channel with the given url\n\
+\t-driveby a channel with the given url\n\
 driveby search \"song name\"\n\
-    -same as play search, but driveby\n\
+\t-same as play search, but driveby\n\
 queue \"url\" *\n\
-    -queue up as many urls as you type (separated by space) starts playing if queue is empty\n\
+\t-queue up as many urls as you type (separated by space) starts playing if queue is empty\n\
 next \"url\"\n\
-    -queue up the given url to play next\n\
+\t-queue up the given url to play next\n\
 goto X\n\
-    -jump to and play the queue index given (starting at 1)\n\
+\t-jump to and play the queue index given (starting at 1)\n\
 rm X Y etc\n\
-    -remove queue elements, provide indices separated by spaces\n\
+\t-remove queue elements, provide indices separated by spaces\n\
 list\n\
-    -lists the current queue\n\
+\t-lists the current queue\n\
 pause\n\
-    -pause currently playing track\n\
+\t-pause currently playing track\n\
 resume\n\
-    -resume a currently pause track\n\
+\t-resume a currently pause track\n\
 skip\n\
-    -skip the current track\n\
+\t-skip the current track\n\
 clear\n\
-    -clears everything in the queue but the song playing \n\
+\t-clears everything in the queue but the song playing \n\
 stop\n\
-    -stop the player, but don't leave\n\
+\t-stop the player, but don't leave\n\
 leave\n\
-    -tells the player to fuck outta here\n\
+\t-tells the player to fuck outta here\n\
 help\n\
-    -show this\n\
+\t-show this\n\
 ```\
 ";
 
