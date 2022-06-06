@@ -32,6 +32,8 @@ pub enum Token {
     Driveby,
     #[token("queue")]
     Queue,
+    #[token("search")]
+    Search,
     #[token("next")]
     Next,
     #[token("rm")]
@@ -53,6 +55,31 @@ pub enum Token {
     Arguments, // The token used to signify that we expect infininte arguments
 }
 
+// Separate object in case we want commands for different sniffer components
+
+// This is the audio one in particular
+struct AudioCommands;
+impl AudioCommands {
+    const EXPECTED_TOKENS: &'static [&'static [Token]] = &[
+        &[Token::Help],
+        &[Token::List],
+        &[Token::Pause],
+        &[Token::Resume],
+        &[Token::Skip],
+        &[Token::Clear],
+        &[Token::Stop],
+        &[Token::Leave],
+        &[Token::Play, Token::Argument],
+        &[Token::Play, Token::Search, Token::Arguments],
+        &[Token::Driveby, Token::Argument],
+        &[Token::Driveby, Token::Search, Token::Argument],
+        &[Token::Queue, Token::Arguments],
+        &[Token::Next, Token::Arguments],
+        &[Token::Goto, Token::Argument],
+        &[Token::Rm, Token::Arguments],
+    ];
+}
+
 fn get_tokens(string: &String) -> Vec<(Token, Span)> {
     return Token::lexer(string).spanned().collect(); // Drop the span, we don't care about it
 }
@@ -63,11 +90,22 @@ pub fn tokenize(string: &String) -> Result<(Vec<Token>, Option<Vec<Token>>), Str
     let tokens: Vec<Token> = tokenized.iter().map(|x| x.0.clone()).collect(); // Collect all the Tokens into a vector, drop the span
     // Big yucky, but it goes through tokens and keeps everything that's a generic into a new vec
     let args = tokens.iter().cloned().filter(|x| { if let Token::Generic(_) = x { return true } false } ).collect();
-
+    warn!("These are the args: {:?}", args);
     if tokens.is_empty() {
         return Err(String::from("No tokens parsed in string"));
     }
     return Ok((tokens, Some(args)));
+}
+
+pub fn generic_tokens_to_string(tokens: Vec<Token>) -> Result<String, String> {
+    let mut built_string = String::new();
+    for token in tokens {
+        match token {
+            Token::Generic(t) => built_string = built_string + " " + &t,
+            _ => return Err(String::from("Bug, generic doesn't contain a string")),
+        }
+    }
+    return Ok(built_string);
 }
 
 #[derive(Clone)]
@@ -82,15 +120,28 @@ impl Parser {
     }
 
     // Our token matching function
-    fn match_tokens(&self, msg: &Message) -> Result<(Token, Option<Vec<Token>>), String> {
+    fn match_tokens(&self, msg: &Message) -> Result<(Vec<Token>, Option<Vec<Token>>), String> {
         
         let (tokens, generic_args) = tokenize(&msg.content)?;
+        // Create another array of tokens minus to use for our match table
+        let mut command_tokens = tokens.clone();
+        // We have to do the dumbness below because the if let is the only way to match generic enums
+        command_tokens.retain(|t| (
+            if let Token::Generic(_) = t {
+                false
+            }
+            else {
+                true
+            }
+
+        ));
+
         trace!("Tokens: {:?}", tokens);
         trace!("Args: {:?}", generic_args);
         
         'outer: for token_array in AudioCommands::EXPECTED_TOKENS { // Loop through our 2d array of known good token chains
             let mut parsed_tokens_iter = tokens.clone().into_iter().peekable();
-            let currently_checking_token = token_array[0].clone();
+            //let currently_checking_token = token_array[0].clone();
             trace!("Currently checking out token string for {:?}", token_array);
             for token in *token_array { // Loop through each token in array
                 trace!("Working on {:?}", token);
@@ -135,7 +186,8 @@ impl Parser {
                         // Otherwise we've matched a token, and we keep going
                     }
                     None => {
-                        trace!("Ran out of parsed tokens, can't match {:?}, continuing", currently_checking_token);
+                        //warn!("Ran out of parsed tokens, can't match {:?}, continuing", currently_checking_token);
+                        trace!("Ran out of parsed tokens, can't match {:?}, continuing", token_array);
                         continue 'outer;
                     },
                     
@@ -146,7 +198,8 @@ impl Parser {
             if parsed_tokens_iter.peek().is_some(){ 
                 return Err(String::from("Matched a valid command, but we still have parsed tokens, making it bad"));
             }
-            return Ok((currently_checking_token, generic_args));     
+            //return Ok((currently_checking_token, generic_args));     
+            return Ok((command_tokens, generic_args));     
         }
         Err(String::from("No valid token chain has been found"))
     }
@@ -155,77 +208,88 @@ impl Parser {
     pub async fn process(&self, ctx: &Context, msg: &Message) -> Result<(), String> {
         let (matched, args) = self.match_tokens(msg)?;
         warn!("Matched {:?} with args {:?}", matched, args);
-        match matched {
-            Token::Help => {
+        match &matched[..] { // vec to slice (array) for nice matching
+            [Token::Help] => {
                 let locked_player = self.audio_player.lock().await;
                 locked_player.print_help(ctx)?;
             }
-            Token::List => {
+            [Token::List] => {
                 let locked_player = self.audio_player.lock().await;
                 locked_player.print_queue(ctx)?;
             },
-            Token::Pause => {
+            [Token::Pause] => {
                 let locked_player = self.audio_player.lock().await;
                 locked_player.pause_locking()?;
             },
-            Token::Resume => {
+            [Token::Resume] => {
                 let locked_player = self.audio_player.lock().await;
                 locked_player.resume_locking()?;
 
             },
-            Token::Skip => {
+            [Token::Skip] => {
                 let locked_player = self.audio_player.lock().await;
                 locked_player.skip_locking()?;
 
             },
-            Token::Clear => {
+            [Token::Clear] => {
                 let locked_player = self.audio_player.lock().await;
                 locked_player.clear_queue_locking()?;
 
             },
-            Token::Stop => {
+            [Token::Stop] => {
                 let locked_player = self.audio_player.lock().await;
                 locked_player.stop_locking()?;
 
             },
-            Token::Leave => {
+            [Token::Leave] => {
                 let mut locked_player = self.audio_player.lock().await;
                 locked_player.hangup()?;
 
             },
-            Token::Play => {
+            [Token::Play] => {
                 let mut locked_player = self.audio_player.lock().await;
-                locked_player.process_play(&ctx, &msg, args.unwrap()).await?;
+                locked_player.process_play_url(&ctx, &msg, args.unwrap()).await?;
 
             },
-            Token::Driveby => {
+            [Token::Play, Token::Search] => {
                 let mut locked_player = self.audio_player.lock().await;
-                locked_player.process_driveby(&ctx, &msg, args.unwrap()).await?;
+                let search_string = generic_tokens_to_string(args.unwrap()).unwrap();
+                //locked_player.process_play_search(&ctx, &msg, args.unwrap()).await?;
+                locked_player.process_play_search(&ctx, &msg, &search_string).await?;
 
             },
-            Token::Queue => {
+            [Token::Driveby] => {
+                let mut locked_player = self.audio_player.lock().await;
+                locked_player.process_driveby_url(&ctx, &msg, args.unwrap()).await?;
+            },
+            [Token::Driveby, Token::Search] => {
+                let mut locked_player = self.audio_player.lock().await;
+                let search_string = generic_tokens_to_string(args.unwrap()).unwrap();
+                locked_player.process_driveby_search(&ctx, &msg, &search_string).await?;
+            },
+            [Token::Queue] => {
                 let mut locked_player = self.audio_player.lock().await;
                 locked_player.process_enqueue(&ctx, &msg, args.unwrap()).await?;
 
             },
-            Token::Next => {
+            [Token::Next] => {
                 let mut locked_player = self.audio_player.lock().await;
                 locked_player.process_next(&ctx, &msg, args.unwrap()).await?;
 
             },
-            Token::Goto => {
+            [Token::Goto] => {
                 let locked_player = self.audio_player.lock().await;
                 locked_player.process_goto(args.unwrap()).await?;
                 
 
             },
-            Token::Rm => {
+            [Token::Rm] => {
                 let mut locked_player = self.audio_player.lock().await;
                 locked_player.process_rm(args.unwrap()).await?;
 
             },
             _ => {
-                return Err(String::from(format!("Found a token that isn't in the table??? should never happen: {:?}", matched)));
+                return Err(String::from(format!("Found a valid token that isn't in the table. You probably forgot to add parsing logic: {:?}", matched)));
             }
         }
         Ok(())
@@ -233,29 +297,44 @@ impl Parser {
 
 }
 
+pub static HELP_TEXT: &str =
+"```\n\
+play \"url\"\n\
+    -plays the given url, inserts into the front of the queue\n\
+play search \"song name\"\n\
+    -searches youtube and plays what you enter\n\
+driveby \"url\"\n\
+    -driveby a channel with the given url\n\
+driveby search \"song name\"\n\
+    -same as play search, but driveby\n\
+queue \"url\" *\n\
+    -queue up as many urls as you type (separated by space) starts playing if queue is empty\n\
+next \"url\"\n\
+    -queue up the given url to play next\n\
+goto X\n\
+    -jump to and play the queue index given (starting at 1)\n\
+rm X Y etc\n\
+    -remove queue elements, provide indices separated by spaces\n\
+list\n\
+    -lists the current queue\n\
+pause\n\
+    -pause currently playing track\n\
+resume\n\
+    -resume a currently pause track\n\
+skip\n\
+    -skip the current track\n\
+clear\n\
+    -clears everything in the queue but the song playing \n\
+stop\n\
+    -stop the player, but don't leave\n\
+leave\n\
+    -tells the player to fuck outta here\n\
+help\n\
+    -show this\n\
+```\
+";
+
+
 trait Process {
     fn process(&self) -> Result<(), String>;
-}
-
-// Separate object in case we want commands for different sniffer components
-
-// This is the audio one in particular
-struct AudioCommands;
-impl AudioCommands {
-    const EXPECTED_TOKENS: &'static [&'static [Token]] = &[
-        &[Token::Help],
-        &[Token::List],
-        &[Token::Pause],
-        &[Token::Resume],
-        &[Token::Skip],
-        &[Token::Clear],
-        &[Token::Stop],
-        &[Token::Leave],
-        &[Token::Play, Token::Argument],
-        &[Token::Driveby, Token::Argument],
-        &[Token::Queue, Token::Arguments],
-        &[Token::Next, Token::Arguments],
-        &[Token::Goto, Token::Argument],
-        &[Token::Rm, Token::Arguments],
-    ];
 }

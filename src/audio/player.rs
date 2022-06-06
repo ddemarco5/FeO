@@ -3,8 +3,9 @@ use tokio::sync::{Mutex};
 
 use songbird::{
     {Songbird, Call},
-    {ytdl, tracks::create_player},
-    tracks::{Track, PlayMode},
+    //{ytdl, ytdl_search, tracks::create_player},
+    input::{ytdl, ytdl_search},
+    tracks::{Track, PlayMode, create_player},
     driver::Bitrate,
     Event,
     EventContext,
@@ -25,26 +26,8 @@ use serenity::{
 };
 
 use uuid::Uuid;
+use crate::commands::HELP_TEXT;
 use crate::commands::Token;
-
-static HELP_TEXT: &str =
-"```\n\
-help - show this\n\
-play 'url' - plays the given url, inserts into the front of the queue\n\
-driveby 'url' - driveby a channel with the given url\n\
-queue 'url' * - queue up the given url(s), starts playing if queue was empty\n\
-next 'url' - queue up the given url to play next\n\
-goto X (>0) - jump to and play the queue index given\n\
-rm X Y, etc (>0) - remove queue elements, provide indices separated by spaces\n\
-list - lists the current queue\n\
-pause - pause currently playing track\n\
-resume - resume a currently pause track\n\
-skip - skip the current track\n\
-clear - clears everything in the queue but the song playing \n\
-stop - stop the player, but don't leave\n\
-leave - tells the player to fuck outta here\n\
-```\
-";
 
 // macro to break our tokio lock out of async
 macro_rules! lock_call {
@@ -371,10 +354,14 @@ impl AudioPlayer {
         return Ok(());
     }
 
-    async fn make_ytdl_track(&mut self, url: &str) -> Result<Track, Error> {
-        warn!("Loading url: {}", url);
+    async fn make_ytdl_track(&mut self, target: &str, search: bool) -> Result<Track, Error> {
+        //warn!("Loading url: {}", target);
         // Create our player
-        let youtube_input = ytdl(url).await?;
+        //let youtube_input = ytdl(url).await?;
+        let youtube_input = match search {
+            true => ytdl_search(target).await,
+            false => ytdl(target).await,
+        }?;
         let metadata = youtube_input.metadata.clone();
         warn!("Loaded up track: {} - {}", metadata.title.unwrap(), metadata.source_url.unwrap());
         let (audio, _track_handle) = create_player(youtube_input);
@@ -422,66 +409,105 @@ impl AudioPlayer {
         Ok(())
     }
 
-
-    pub async fn process_driveby(&mut self, ctx: &Context, new_message: &Message, args: Vec<Token>) -> Result<(), String> {
+    // Handle the driveby or no search variants of play
+    pub async fn process_driveby_url(&mut self, ctx: &Context, new_message: &Message, args: Vec<Token>) -> Result<(), String> {
         if args.len() > 1 {
             return Err(String::from("Too many arguments given to driveby"));
         }
-        if let Token::Generic(url_to_play) = args.first().unwrap() {
-            warn!("Told to play {}", url_to_play);
-            // Remove the timeout so we don't accidentally hang up while we process
-            self.cancel_timeout();
-            // Play the track
-            warn!("driveby with {}", url_to_play);
-            // Load up our song
-            let track = match self.make_ytdl_track(url_to_play).await {
-                Ok(t) => t,
-                Err(e) => {
-                    return Err(String::from(format!("Error making yt track: {}", e)));
-                }
-            };
-            warn!("Successfully loaded track, pullin up");
-            // Join channel with the most people
-
-            self.join_most_crowded(&new_message, &ctx).await?;
-            // Get out of there when we're done
-            self.set_idle_check(TrackEndAction::LEAVE);
-            // play our track
-            self.play_only_track(track).await?;
-            // Clear the queue after we join
-            self.clear_queue_locking()?;
+        match args.first().unwrap() {
+            Token::Generic(t) => self.process_driveby(ctx, new_message, t, false).await,
+            _ => return Err(String::from("Bug, not given a generic argument")),
         }
+    }
+    pub async fn process_driveby_search(&mut self, ctx: &Context, new_message: &Message, play_string: &String) -> Result<(), String> {
+        self.process_driveby(ctx, new_message, play_string, true).await
+    }
+    async fn process_driveby(&mut self, ctx: &Context, new_message: &Message, target_to_play: &String, search: bool) -> Result<(), String> {
+        //if let Token::Generic(target_to_play) = args.first().unwrap() {
+        warn!("Told to play {}", target_to_play);
+        // Remove the timeout so we don't accidentally hang up while we process
+        self.cancel_timeout();
+        // Play the track
+        warn!("driveby with {}", target_to_play);
+        // Load up our song
+        let track = match search {
+            true => self.make_ytdl_track(target_to_play.as_str(), true).await,
+            false => self.make_ytdl_track(target_to_play.as_str(), false).await,
+        };
+        match track {
+            Ok(t) => {
+                warn!("Successfully loaded track, pullin up");
+                // Join channel with the most people
+
+                self.join_most_crowded(&new_message, &ctx).await?;
+                // Get out of there when we're done
+                self.set_idle_check(TrackEndAction::LEAVE);
+                // play our track
+                self.play_only_track(t).await?;
+                // Clear the queue after we join
+                self.clear_queue_locking()?;
+            },
+            Err(e) => {
+                return Err(String::from(format!("Error making yt track: {}", e)));
+            }
+        }; 
+        //}
         Ok(())
     }
 
-    pub async fn process_play(&mut self, ctx: &Context, new_message: &Message, args: Vec<Token>) -> Result<(), String> {
-
+    // Handle the search or no search variants of play
+    pub async fn process_play_url(&mut self, ctx: &Context, new_message: &Message, args: Vec<Token>) -> Result<(), String> {
         if args.len() > 1 {
             return Err(String::from("Too many arguments given to play"));
         }
-        if let Token::Generic(url_to_play) = args.first().unwrap() {
-            warn!("Told to play {}", url_to_play);
-            // Remove the timeout so we don't accidentally hang up while we process
-            self.cancel_timeout();
-            // Play the track
-            let track = self.make_ytdl_track(url_to_play.as_str()).await;
-            match track {
-                Ok(t) => {
-                    warn!("Successfully created track");
-                    // Make sure our idle action is set to timeout
-                    self.set_idle_check(TrackEndAction::TIMEOUT);
-                    self.join_summoner(&new_message, &ctx).await?;
-                    warn!("Joined summoner");
-                    // play our track
-                    warn!("playing");
-                    self.play_only_track(t).await?;
-                }
-                Err(e) => {
-                    // Leave bc we can't play shit
-                    return Err(String::from(format!("Couldn't create track: {}", e)));
-                }
+        match args.first().unwrap() {
+            Token::Generic(t) => self.process_play(ctx, new_message, t, false).await,
+            _ => return Err(String::from("Bug, not given a generic argument")),
+        }
+
+    }
+    pub async fn process_play_search(&mut self, ctx: &Context, new_message: &Message, play_string: &String) -> Result<(), String> {
+        //self.process_play(ctx, new_message, play_string, true).await
+        match self.process_play(ctx, new_message, play_string, true).await {
+            Err(e) => return Err(String::from(e)),
+            Ok(_) => self.print_queue(ctx),
+        }?;
+        Ok(())
+    }
+    async fn process_play(&mut self, ctx: &Context, new_message: &Message, target_to_play: &String, search: bool) -> Result<(), String> {
+
+        /*
+        if args.len() > 1 {
+            return Err(String::from("Too many arguments given to play"));
+        }
+        */
+        //if let Token::Generic(target_to_play) = args.first().unwrap() {
+        warn!("Told to play {}", target_to_play);
+        // Remove the timeout so we don't accidentally hang up while we process
+        self.cancel_timeout();
+        // Play the track
+        //let track = self.make_ytdl_track(url_to_play.as_str()).await;
+        let track = match search {
+            true => self.make_ytdl_track(target_to_play.as_str(), true).await,
+            false => self.make_ytdl_track(target_to_play.as_str(), false).await,
+        };
+        match track {
+            Ok(t) => {
+                warn!("Successfully created track");
+                // Make sure our idle action is set to timeout
+                self.set_idle_check(TrackEndAction::TIMEOUT);
+                self.join_summoner(&new_message, &ctx).await?;
+                warn!("Joined summoner");
+                // play our track
+                warn!("playing");
+                self.play_only_track(t).await?;
             }
-        } 
+            Err(e) => {
+                // Leave bc we can't play shit
+                return Err(String::from(format!("Couldn't create track: {}", e)));
+            }
+        }
+        //} 
         Ok(())
     }
 
@@ -497,7 +523,7 @@ impl AudioPlayer {
                 Token::Generic(url) => {
                     warn!("Told to queue {}", url);
                     // Make the track
-                    match self.make_ytdl_track(url.as_str()).await {
+                    match self.make_ytdl_track(url.as_str(), false).await {
                         Ok(t) => {
                             warn!("Successfully created track");
                             tracks.push(t);
@@ -537,13 +563,13 @@ impl AudioPlayer {
         match queue.is_empty() {
             true => {
                 warn!("queue is empty, just load a basic track");
-                self.process_play(ctx, new_message, args).await?;
+                self.process_play_url(ctx, new_message, args).await?;
             }
             false => {
                 if let Token::Generic(url_to_play) = args.first().unwrap() {
                     warn!("Told to queue next {}", url_to_play);
                     // Make the track
-                    let track = self.make_ytdl_track(url_to_play).await;
+                    let track = self.make_ytdl_track(url_to_play, false).await;
                     match track {
                         Ok(t) => {
                             warn!("Successfully created track");
