@@ -170,7 +170,7 @@ impl RedditScraper {
     fn pull_posts(&self) -> Result<Vec<SnifferPost>, Error> {
         // Get from reddit api
 
-        // dumb shit to run async in a sync function
+        // what's required to run async in a sync function
         let reddit_posts = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
                 //self.the_sniffer.submitted().await

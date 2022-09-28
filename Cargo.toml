@@ -1,6 +1,6 @@
 [package]
-name = "sniffer"
-version = "0.6.9"
+name = "FeO"
+version = "0.1"
 authors = ["Dominic DeMarco <awesome3165@gmail.com>"]
 edition = "2018"
 

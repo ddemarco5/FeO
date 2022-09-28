@@ -68,7 +68,6 @@ async fn main() {
 
     // Clone discord bot to use in a thread
     let discord_bot_clone = discord_bot.clone();
-    // Run in a loop to wait for the sniffer to strike again
     let mut run_token = None;
     if will_sniff {
         // Create our api interfaces

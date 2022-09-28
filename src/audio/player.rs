@@ -357,7 +357,6 @@ impl AudioPlayer {
     async fn make_ytdl_track(&mut self, target: &str, search: bool) -> Result<Track, Error> {
         //warn!("Loading url: {}", target);
         // Create our player
-        //let youtube_input = ytdl(url).await?;
         let youtube_input = match search {
             true => ytdl_search(target).await,
             false => ytdl(target).await,
@@ -423,7 +422,6 @@ impl AudioPlayer {
         self.process_driveby(ctx, new_message, play_string, true).await
     }
     async fn process_driveby(&mut self, ctx: &Context, new_message: &Message, target_to_play: &String, search: bool) -> Result<(), String> {
-        //if let Token::Generic(target_to_play) = args.first().unwrap() {
         warn!("Told to play {}", target_to_play);
         // Remove the timeout so we don't accidentally hang up while we process
         self.cancel_timeout();
@@ -451,7 +449,6 @@ impl AudioPlayer {
                 return Err(String::from(format!("Error making yt track: {}", e)));
             }
         }; 
-        //}
         Ok(())
     }
 
@@ -476,17 +473,10 @@ impl AudioPlayer {
     }
     async fn process_play(&mut self, ctx: &Context, new_message: &Message, target_to_play: &String, search: bool) -> Result<(), String> {
 
-        /*
-        if args.len() > 1 {
-            return Err(String::from("Too many arguments given to play"));
-        }
-        */
-        //if let Token::Generic(target_to_play) = args.first().unwrap() {
         warn!("Told to play {}", target_to_play);
         // Remove the timeout so we don't accidentally hang up while we process
         self.cancel_timeout();
         // Play the track
-        //let track = self.make_ytdl_track(url_to_play.as_str()).await;
         let track = match search {
             true => self.make_ytdl_track(target_to_play.as_str(), true).await,
             false => self.make_ytdl_track(target_to_play.as_str(), false).await,
@@ -503,7 +493,7 @@ impl AudioPlayer {
                 self.play_only_track(t).await?;
             }
             Err(e) => {
-                // Leave bc we can't play shit
+                // Leave bc we can't play anything
                 return Err(String::from(format!("Couldn't create track: {}", e)));
             }
         }
@@ -656,10 +646,8 @@ impl AudioPlayer {
     pub async fn process_goto(&self, args: Vec<Token>) -> Result<(), String> {
         // Process the goto command, but there's a trick... because of how we structure our queue,
         // all we actually have to do is skip an equal amount of times as the track index we're given
-        //let idx = self.parse_goto(new_message)?;
         let idx = match args.first().unwrap() {
             Token::Generic(s) => {
-                //let idx = s.parse::<u32>();
                 match s.parse::<u32>() {
                     Ok(idx) => idx,
                     Err(e) => return Err(String::from(format!("Couldn't parse index from argument: {}", e))),
